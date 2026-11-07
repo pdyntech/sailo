@@ -376,6 +376,7 @@ Other commands:
 npm test                  # unit tests (Vitest)
 npm run lifecycle         # full Noir lifecycle on Testnet, prints Stellar Expert links
 npm run default-demo      # default + recovery on Testnet
+npm run check-mail -- you@example.com   # checks SMTP_URL / MAIL_FROM in .env.local by sending a test email
 ```
 
 **Deploy:** Vercel (`vercel.json` is included) with a Redis store: add **Upstash** from the Vercel Marketplace (Storage tab), which sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`. Accounts, portal invoices and the demo run are then shared by every instance and survive restarts. Render or Railway also work: start command `npm start`, Node 24, and point `DATA_DIR` at a persistent disk (or add the same Redis variables). Then set the Velo webhook URL to `https://<your-host>/api/webhooks/velo`. Health check: `GET /api/health`. See [`apps/server/README.md`](apps/server/README.md).
@@ -393,7 +394,7 @@ npm run default-demo      # default + recovery on Testnet
 | `APP_URL` | Public site URL for checkout success and cancel links | Hosting provider |
 | `LLM_API_KEY`, `LLM_MODEL` | Optional model that writes the decision reason | LLM provider |
 | `DATA_DIR` | Folder for accounts, sessions and portal invoices (`sailo.json`) | A persistent disk on the host |
-| `SMTP_URL`, `MAIL_FROM` | Outgoing email for verification and password reset | Any SMTP provider (e.g. Resend, Gmail app password) |
+| `SMTP_URL`, `MAIL_FROM` | Outgoing email for verification and password reset. Without them a deployed site skips email verification and can't send password-reset links. Test them first with `npm run check-mail` | Any SMTP provider (e.g. Resend, Gmail app password) |
 | `NODE_ENV` | `production` hides development email links in the UI | Hosting provider |
 | `TRUST_PROXY` | `1` trusts `X-Forwarded-For` (on by default in production) | Optional |
 | `PORTAL_VOYAGE_MS` | Portal voyage length, default `60000` (the advance's Testnet transactions run during the voyage) | Optional |
