@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <a href="https://sailo.pdyntech.com><img alt="Live website" src="https://img.shields.io/badge/Live_Website-noirxvelo.vercel.app-0F766E?style=for-the-badge&logo=vercel&logoColor=white"></a>
+  <a href="https://sailo.pdyntech.com"><img alt="Live website" src="https://img.shields.io/badge/Live_Website-noirxvelo.vercel.app-0F766E?style=for-the-badge&logo=vercel&logoColor=white"></a>
   <a href="https://drive.google.com/file/d/1Cr3ncFfuCpBHOgGlcBWTrQGCC-COpCrC/view?usp=share_link"><img alt="Demo video" src="https://img.shields.io/badge/Demo_Video-2_min-C0392B?style=for-the-badge&logo=googledrive&logoColor=white"></a>
   <a href="https://drive.google.com/file/d/1oCUmO3Og3WVbIg9tBZ6OpIl-SqDwVyF2/view?usp=sharing"><img alt="Pitch deck" src="https://img.shields.io/badge/Pitch_Deck-Slides-F2730A?style=for-the-badge&logo=googledrive&logoColor=white"></a>
 </p>
