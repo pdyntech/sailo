@@ -32,6 +32,11 @@
   <a href="https://drive.google.com/file/d/1oCUmO3Og3WVbIg9tBZ6OpIl-SqDwVyF2/view?usp=sharing"><img alt="Pitch deck" src="https://img.shields.io/badge/Pitch_Deck-Slides-F2730A?style=for-the-badge&logo=googledrive&logoColor=white"></a>
 </p>
 
+**Live website:** https://sailo.pdyntech.com<br>
+**Demo video (2 min):** https://drive.google.com/file/d/1Cr3ncFfuCpBHOgGlcBWTrQGCC-COpCrC/view?usp=share_link<br>
+**Pitch deck:** https://drive.google.com/file/d/1oCUmO3Og3WVbIg9tBZ6OpIl-SqDwVyF2/view?usp=sharing<br>
+**Team:** Helena (haenlenaeean), Ethan (perrytot_), Dia Aviles (kirs6103)
+
 <p align="center">
   <a href="#problem">Problem</a> ·
   <a href="#solution">Solution</a> ·
