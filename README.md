@@ -32,16 +32,6 @@
   <a href="https://drive.google.com/file/d/1oCUmO3Og3WVbIg9tBZ6OpIl-SqDwVyF2/view?usp=sharing"><img alt="Pitch deck" src="https://img.shields.io/badge/Pitch_Deck-Slides-F2730A?style=for-the-badge&logo=googledrive&logoColor=white"></a>
 </p>
 
-<div align="center">
-
-| Team | Role | GitHub | Discord |
-| :--- | :--- | :--- | :--- |
-| Helena | Fullstack Developer and DevOps | [@helenaherrero515](https://github.com/helenaherrero515) | `haenlenaeean` |
-| Ethan | Blockchain Developer | [@thanreiz](https://github.com/thanreiz) | `perrytot_` |
-| Dia Aviles | Project Manager and Frontend | [@krstndiane](https://github.com/krstndiane) | `kirs6103` |
-
-</div>
-
 <p align="center">
   <a href="#problem">Problem</a> ·
   <a href="#solution">Solution</a> ·
@@ -428,11 +418,11 @@ npm run default-demo      # default + recovery on Testnet
 
 ## Credits
 
-| Member | GitHub | Lane |
-| :-- | :-- | :-- |
-| Helena | [@helenaherrero515](https://github.com/helenaherrero515) | Fullstack Developer and DevOps  |
-| Ethan | [@thanreiz](https://github.com/thanreiz) | Blockchain: Noir client, executor, guardrail, recovery, Testnet proof |
-| Dia Aviles | [@krstndiane](https://github.com/krstndiane) | Project manager, frontend |
+| Member | GitHub | Discord | Lane |
+| :-- | :-- | :-- | :-- |
+| Helena | [@helenaherrero515](https://github.com/helenaherrero515) | `haenlenaeean` | Fullstack Developer and DevOps |
+| Ethan | [@thanreiz](https://github.com/thanreiz) | `perrytot_` | Blockchain: Noir client, executor, guardrail, recovery, Testnet proof |
+| Dia Aviles | [@krstndiane](https://github.com/krstndiane) | `kirs6103` | Project manager, frontend |
 
 Built on [Noir](https://github.com/noirx402/noir) agent contracts, [Velo](https://velo-build.dev) checkout and the [Stellar](https://stellar.org/) Testnet.
 
