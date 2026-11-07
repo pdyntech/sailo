@@ -27,12 +27,27 @@ try {
 }
 const pending = new Set(); // actions the user just clicked (spinner until the server reports busy)
 
+// Operator token for mode switching: open /app?ops=<OPS_TOKEN> once; it is kept in this browser and removed from the URL.
+let opsToken = null;
+try {
+  const u = new URL(location.href);
+  const t = u.searchParams.get("ops");
+  if (t) {
+    localStorage.setItem("opsToken", t);
+    u.searchParams.delete("ops");
+    history.replaceState(null, "", u.pathname + u.search + u.hash);
+  }
+  opsToken = localStorage.getItem("opsToken");
+} catch {
+  opsToken = null;
+}
+
 // ---------------- API ----------------
 async function act(path, label) {
   pending.add(path);
   render();
   try {
-    const r = await fetch(`/api/${path}`, { method: "POST" });
+    const r = await fetch(`/api/${path}`, { method: "POST", headers: opsToken ? { "x-ops-token": opsToken } : {} });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.ok === false) toast(j.error || `${label} failed (${r.status})`, true);
   } catch (e) {

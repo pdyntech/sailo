@@ -5,9 +5,10 @@
  */
 import * as demo from "./demo.js";
 import { withDb } from "./db.js";
+import { env } from "./env.js";
 import { getRaw, kvEnabled, setNx } from "./kv.js";
 import { dueJobs, recordPayment, startJobs } from "./portal-chain.js";
-import { WebhookRejected, verifyWebhook, type VerifiedEvent } from "./velo.js";
+import { WebhookRejected, retrievePaymentStatus, verifyWebhook, type VerifiedEvent } from "./velo.js";
 
 const seenLocal = new Set<string>();
 const WEEK_MS = 7 * 86_400_000;
@@ -37,6 +38,21 @@ export async function handleVeloWebhook(raw: string, signature: string | null, d
     return { status: 200, body: { ok: true, ignored: ev.type } };
   }
   const piId = ev.paymentIntent.id;
+  // Ask Velo directly before moving money: the signed webhook says "paid", the payment intent must agree.
+  let status: Awaited<ReturnType<typeof retrievePaymentStatus>>;
+  try {
+    status = await retrievePaymentStatus(piId);
+  } catch (e) {
+    console.warn("velo payment status lookup failed:", e instanceof Error ? e.message : e);
+    return { status: 503, body: { ok: false, error: "payment status unavailable, retry" } };
+  }
+  if (status) {
+    if (status.status !== "paid") return { status: 409, body: { ok: false, error: `payment intent is ${status.status}, not paid` } };
+    const asset = env("VELO_CHECKOUT_ASSET") ?? "native";
+    if (status.asset !== asset) return { status: 409, body: { ok: false, error: `paid in ${status.asset}, expected ${asset}` } };
+    // Velo's record wins over the webhook body for amount and asset.
+    ev = { ...ev, paymentIntent: { ...ev.paymentIntent, amount: status.amount, asset: status.asset } };
+  }
   const portal = await withDb(() => ({ matched: recordPayment(piId, ev, false), due: dueJobs() }));
   let result: { status: number; body: unknown };
   if (portal.matched) {

@@ -2,10 +2,11 @@
  * The request handler shared by the long-running server (index.ts) and the Vercel function (vercel.ts):
  * the demo API, the Velo webhook, the site/portal API, and the static frontend in apps/web.
  */
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
-import { WEB_DIR } from "./env.js";
+import { WEB_DIR, env } from "./env.js";
 import * as demo from "./demo.js";
 import { readBody, send, toJson } from "./http.js";
 import { kvBackend, kvEnabled, LockTimeout } from "./kv.js";
@@ -42,6 +43,23 @@ const ACTIONS: Record<string, () => Promise<unknown>> = {
   "/api/mode/testnet": demo.useTestnet,
   "/api/run-demo": demo.runDemo,
 };
+
+/**
+ * Operator-only actions. Switching chain modes changes what every visitor sees (real Testnet transactions or the
+ * in-memory simulation), so it needs OPS_TOKEN, sent as the x-ops-token header. Every other action is a demo step
+ * that anyone may run: each checks the demo's state, and only one runs at a time.
+ */
+const OPS_ONLY = new Set(["/api/mode/simulation", "/api/mode/testnet"]);
+const deployed = (): boolean => env("NODE_ENV") === "production" || !!(process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT);
+
+function opsRefusal(req: IncomingMessage): { status: number; error: string } | null {
+  const token = env("OPS_TOKEN");
+  if (!token) return deployed() ? { status: 403, error: "Switching modes is turned off on this server (OPS_TOKEN is not set)." } : null;
+  const given = req.headers["x-ops-token"];
+  const digest = (v: string) => createHash("sha256").update(v).digest();
+  if (typeof given === "string" && timingSafeEqual(digest(given), digest(token))) return null;
+  return { status: 401, error: "Only the operator can switch modes." };
+}
 
 async function handleAction(path: string, res: ServerResponse): Promise<void> {
   const fn = ACTIONS[path]!;
@@ -130,7 +148,11 @@ export async function handler(req: IncomingMessage, res: ServerResponse): Promis
       const r = await handleVeloWebhook(raw, typeof sig === "string" ? sig : null, typeof dlv === "string" ? dlv : null);
       return send(res, r.status, r.body);
     }
-    if (req.method === "POST" && path in ACTIONS) return handleAction(path, res);
+    if (req.method === "POST" && path in ACTIONS) {
+      const refused = OPS_ONLY.has(path) ? opsRefusal(req) : null;
+      if (refused) return send(res, refused.status, { ok: false, error: refused.error });
+      return handleAction(path, res);
+    }
     if (path.startsWith("/api/") && (await handleSite(req, res, path))) return;
     if (path.startsWith("/api/")) return send(res, 404, { ok: false, error: "not found" });
     if (req.method === "GET" || req.method === "HEAD") return serveStatic(path, res);

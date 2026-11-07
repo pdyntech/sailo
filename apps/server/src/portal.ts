@@ -22,6 +22,7 @@ import { kvEnabled } from "./kv.js";
 import {
   MAX_ONCHAIN_FACE,
   STEP_LABEL,
+  VOYAGE_MS,
   chainAvailable,
   jobFor,
   jobRunning,
@@ -30,8 +31,11 @@ import {
   recordPayment,
   resetRetry,
   signBerthing,
+  voyageReadings,
+  voyageStart,
   type PortalChain,
 } from "./portal-chain.js";
+import { readingsAfter, readingsBerthed, type Reading } from "./telemetry.js";
 import { veloCheckoutConfigured, type CheckoutSession, type VerifiedEvent } from "./velo.js";
 
 export type PState = "TOKENIZED" | "FUNDED" | "ADVANCED" | "IN_TRANSIT" | "BERTHED" | "PAID" | "SETTLED" | "HOLD";
@@ -83,7 +87,6 @@ export interface PortalInvoice {
   chain?: PortalChain | null;
 }
 
-const VOYAGE_MS = Number(process.env.PORTAL_VOYAGE_MS ?? 20_000);
 const ORDER: PState[] = ["TOKENIZED", "FUNDED", "ADVANCED", "IN_TRANSIT", "BERTHED", "PAID", "SETTLED"];
 const TERMS = [30, 45, 60, 90];
 const MAX_OPEN_PER_USER = 50;
@@ -230,23 +233,28 @@ function agentAdvance(i: PortalInvoice): void {
 
 function depart(i: PortalInvoice): void {
   const m = money(i.face);
-  // On-chain invoices: the claim really happened (in the advance step); the voyage itself is simulated AIS.
-  log(i, { title: "Vessel departed", text: `The shipowner claimed ${peso(m.adv)}. Escrow is back to 0 until the cargo owner pays.`, c: "payment_escrow", onchain: !!i.chain });
+  // On-chain invoices: the vessel sailed when the funding landed and the claim really happened in the advance step.
+  if (i.chain) log(i, { title: "Under way", text: `The shipowner claimed ${peso(m.adv)}. The voyage continues; escrow is back to 0 until the cargo owner pays.`, c: "payment_escrow", onchain: true });
+  else log(i, { title: "Vessel departed", text: `The shipowner claimed ${peso(m.adv)}. Escrow is back to 0 until the cargo owner pays.`, c: "payment_escrow" });
   setState(i, "IN_TRANSIT");
 }
 
-function berth(i: PortalInvoice): void {
+/** Arrival, once the berthing rule holds on the AIS readings (the last 3 at the quay at <= 0.5 kn). */
+function berth(i: PortalInvoice, readings: Reading[]): void {
+  if (!readingsBerthed(readings)) throw new Error("berth: the berthing rule does not hold");
+  const sogs = readings.slice(-3).map((r) => r.sog.toFixed(1)).join(", ");
+  const rule = `At the ${i.port} quay for 3 consecutive AIS readings at ${sogs} kn (rule: ≤ 0.5 kn; simulated AIS)`;
   i.berthAttested = true;
   if (i.chain) {
-    i.chain.attestation = signBerthing(i);
+    i.chain.attestation = signBerthing(i, readings);
     const a = i.chain.attestation;
     log(i, {
       title: `Berthed at ${i.port}`,
-      text: `Inside the port geofence at 0.0 kn for 3 consecutive readings (simulated AIS). Proof of delivery signed by the agent key${a ? ` ${a.signer.slice(0, 6)}…: sha256 ${a.sha256.slice(0, 16)}…` : ""}.`,
+      text: `${rule}. Proof of delivery signed by the agent key${a ? ` ${a.signer.slice(0, 6)}…: sha256 ${a.sha256.slice(0, 16)}…` : ""}.`,
       c: "agent_registry",
       onchain: true,
     });
-  } else log(i, { title: `Berthed at ${i.port}`, text: "Inside the port geofence at 0.0 kn for 3 consecutive readings. Arrival attestation recorded.", c: "agent_registry" });
+  } else log(i, { title: `Berthed at ${i.port}`, text: `${rule}. Arrival attestation recorded.`, c: "agent_registry" });
   setState(i, "BERTHED");
 }
 
@@ -291,7 +299,10 @@ function autoStep(i: PortalInvoice, now: number): boolean {
   if (i.chain) {
     // On-chain invoices: money moves only in chain jobs (portal-chain.ts). Only the voyage is timed here.
     if (i.state === "ADVANCED" && age >= 1400) return depart(i), true;
-    if (i.state === "IN_TRANSIT" && age >= VOYAGE_MS) return berth(i), true;
+    if (i.state === "IN_TRANSIT") {
+      const rs = voyageReadings(i, now);
+      return readingsBerthed(rs) ? (berth(i, rs), true) : false;
+    }
     if (i.state === "BERTHED" && i.simDebtor && !i.chain.payment && age >= 5000) {
       // No cargo owner account was named, so their payment is simulated (labelled). Escrow is still funded on-chain.
       i.chain.payment = { verified: true, eventId: `sim_${i.id}`, amountXlm: fromStroops(phpToStroops(BigInt(i.face))), amountMatches: true, verifiedBy: "simulated payer", simulated: true, at: new Date(now).toISOString() };
@@ -304,7 +315,7 @@ function autoStep(i: PortalInvoice, now: number): boolean {
     TOKENIZED: [i.simInvestor ? 8000 : Infinity, () => fund(i, null, "A simulated investor")],
     FUNDED: [1400, () => agentAdvance(i)],
     ADVANCED: [1400, () => depart(i)],
-    IN_TRANSIT: [VOYAGE_MS, () => berth(i)],
+    IN_TRANSIT: [VOYAGE_MS, () => berth(i, voyageReadings(i, now))],
     BERTHED: [i.simDebtor ? 5000 : Infinity, () => pay(i, `${i.debtor} (simulated)`)],
     PAID: [1600, () => agentSettle(i)],
   };
@@ -332,7 +343,7 @@ function fastForward(i: PortalInvoice, target: PState, sampleFunder: string): vo
     if (i.state === "TOKENIZED") fund(i, null, sampleFunder);
     else if (i.state === "FUNDED") agentAdvance(i);
     else if (i.state === "ADVANCED") depart(i);
-    else if (i.state === "IN_TRANSIT") berth(i);
+    else if (i.state === "IN_TRANSIT") berth(i, readingsAfter(VOYAGE_MS, VOYAGE_MS));
     else if (i.state === "BERTHED") pay(i, `${i.debtor} (simulated)`);
     else if (i.state === "PAID") agentSettle(i);
   }
@@ -428,7 +439,7 @@ export interface InvoiceView {
 function progress(i: PortalInvoice, now: number): number {
   const k = ORDER.indexOf(i.state === "HOLD" ? (i.holdFrom ?? "TOKENIZED") : i.state);
   if (k >= ORDER.indexOf("BERTHED")) return 100;
-  if (i.state === "IN_TRANSIT") return Math.min(99, Math.floor(((now - i.stateAt) / VOYAGE_MS) * 100));
+  if (i.state === "IN_TRANSIT") return Math.min(99, Math.max(0, Math.floor(((now - voyageStart(i)) / VOYAGE_MS) * 100)));
   return 0;
 }
 

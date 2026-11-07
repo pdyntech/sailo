@@ -142,7 +142,7 @@ const ROUTES: [method: string, path: RegExp, handler: Handler][] = [
     let ev: VerifiedEvent | null = null;
     if (session.simulated) {
       const d = signSimulatedDelivery({ id: session.id, amount: session.amount, asset: session.asset, description: plan.description });
-      ev = await verifyWebhook(d.body, d.signature);
+      ev = await verifyWebhook(d.body, d.signature, { simulated: true });
     }
     const r = await withDb(() => {
       const u = auth.requireUser(req);

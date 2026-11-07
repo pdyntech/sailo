@@ -32,6 +32,11 @@
   <a href="https://drive.google.com/file/d/1oCUmO3Og3WVbIg9tBZ6OpIl-SqDwVyF2/view?usp=sharing"><img alt="Pitch deck" src="https://img.shields.io/badge/Pitch_Deck-Slides-F2730A?style=for-the-badge&logo=googledrive&logoColor=white"></a>
 </p>
 
+**Live website:** https://sailo.pdyntech.com<br>
+**Demo video (2 min):** https://drive.google.com/file/d/1Cr3ncFfuCpBHOgGlcBWTrQGCC-COpCrC/view?usp=share_link<br>
+**Pitch deck:** https://drive.google.com/file/d/1oCUmO3Og3WVbIg9tBZ6OpIl-SqDwVyF2/view?usp=sharing<br>
+**Team:** Helena (haenlenaeean), Ethan (perrytot_), Dia Aviles (kirs6103)
+
 <p align="center">
   <a href="#problem">Problem</a> ·
   <a href="#solution">Solution</a> ·
@@ -131,11 +136,13 @@ flowchart TD
 
 - **Capped on-chain.** Every payment is checked by Noir's `agent_registry`. A single payout above the cap is refused before any fee is paid.
 - **Roles, not addresses.** The agent names who gets paid. Code maps roles to stored wallets and recomputes every amount, so the model can never pay an arbitrary wallet or see a secret.
-- **Two gates to settle.** A verified Velo webhook for the exact invoice amount, plus a signed berthing attestation.
-- **No double payouts.** One payment in flight per agent, and webhooks are de-duplicated by delivery ID before any side effect.
+- **Two gates to settle.** A verified Velo webhook for the exact invoice amount, confirmed with Velo's payment status (`paid`, expected asset), plus a signed berthing attestation.
+- **Advance only once under way.** The agent's `ADVANCE` gate reads the AIS readings: no payout until the vessel is under way. Berthing is the same rule everywhere: the last 3 readings at the quay at ≤ 0.5 kn.
+- **No double payouts.** One payment in flight per agent, and webhooks are de-duplicated by delivery ID before any side effect. A payout interrupted half-way resumes from the escrow balance: it tells exactly which payouts already landed, and any balance it can't explain holds the invoice.
 - **No double pledging.** A second `registerDevice` for the same waybill hash is rejected on-chain (spike S3).
 - **Fail closed.** Any mismatch becomes a `HOLD`. On default, ops revokes the agent and sweeps the escrow back to treasury.
-- **Clear about what's simulated.** Real: Noir contracts on Testnet, every escrow, authorize and claim, the per-payment cap and the Velo webhook HMAC check. Simulated: AIS vessel positions, the fixed 1 XLM = ₱1,000 rate, and the debtor payment when no Velo key is set.
+- **Known limit.** Noir's policy caps each payment and its expiry, not the payee or the running total, so the agent key is kept server-side and code chooses payees by role. Per-invoice agent keys are on the roadmap.
+- **Clear about what's simulated.** Real: Noir contracts on Testnet, every escrow, authorize and claim, the per-payment cap and the Velo webhook HMAC check. Simulated: AIS vessel positions, the fixed 1 XLM = ₱1,000 rate, and the debtor payment when no Velo key is set. Velo pays the debtor's payment to the project's receiver address; the treasury then funds the invoice escrow from its own Testnet wallet.
 - **Testnet prototype.** Factoring is regulated in the Philippines, and invoice-backed products for investors may count as securities. Shipper, vessel and debtor are fictional. Not financial advice.
 
 ### FAQ
@@ -232,10 +239,11 @@ Related code: the executor's [`execute`](packages/agent/src/executor.ts#L200), t
 
 | Feature | Code |
 | :-- | :-- |
-| Debtor checkout session (`velo.checkout.sessions.create`, asset `native`, idempotency key per invoice) | [`createCheckout`, velo.ts#L42](apps/server/src/velo.ts#L42) |
-| Signed webhook verification (`Velo.webhooks.verify`, raw body, 300 s tolerance) | [`verifyWebhook`, velo.ts#L99](apps/server/src/velo.ts#L99) |
-| Webhook route `POST /api/webhooks/velo` | [app.ts#L109](apps/server/src/app.ts#L109) |
-| De-dupe by `x-velo-delivery`, match amount to the invoice, then treasury funds escrow | [`receiveWebhook`, demo.ts#L570](apps/server/src/demo.ts#L570) |
+| Debtor checkout session (`velo.checkout.sessions.create`, asset `native`, idempotency key per invoice) | [`createCheckout`, velo.ts#L44](apps/server/src/velo.ts#L44) |
+| Signed webhook verification (`Velo.webhooks.verify`, raw body, 300 s tolerance) | [`verifyWebhook`, velo.ts#L122](apps/server/src/velo.ts#L122) |
+| Payment status (`velo.paymentIntents.retrieve`): before any money moves, the intent must be `paid` in the expected asset; Velo's amount wins over the webhook body | [`retrievePaymentStatus`, velo.ts#L83](apps/server/src/velo.ts#L83), checked in [webhooks.ts#L44](apps/server/src/webhooks.ts#L44) |
+| Webhook route `POST /api/webhooks/velo` | [app.ts#L144](apps/server/src/app.ts#L144) |
+| De-dupe by `x-velo-delivery`, match amount to the invoice, then treasury funds escrow | [`applyPayment`, demo.ts#L597](apps/server/src/demo.ts#L597) |
 
 Without `VELO_API_KEY`, checkout is simulated and **labelled as simulated** in the UI. Without `VELO_WEBHOOK_SECRET`, only self-signed simulated deliveries pass verification.
 
@@ -313,11 +321,15 @@ noirxvelo/
 │   │       ├── demo.ts         # Invoice state machine and Run Demo loop
 │   │       ├── agent.ts        # Decision policy (roles only) + optional LLM reason
 │   │       ├── telemetry.ts    # AIS simulator and Cebu berthing rule
-│   │       ├── velo.ts         # Velo checkout + webhook verification
+│   │       ├── velo.ts         # Velo checkout, payment status, webhook verification
+│   │       ├── webhooks.ts     # POST /api/webhooks/velo: verify, confirm status, de-dupe, route
 │   │       ├── simchain.ts     # In-memory contracts for labelled simulation mode
 │   │       ├── site.ts         # Website API: auth, portal, enquiry/newsletter routes
 │   │       ├── accounts.ts     # Accounts, sessions, verification, reset, rate limits
 │   │       ├── portal.ts       # Shared role portal ledger (shipowner, investor, cargo owner)
+│   │       ├── portal-chain.ts # Portal invoices on Stellar Testnet: jobs, agent payouts, exact resume
+│   │       ├── wallets.ts      # Custodial Testnet wallets (AES-256-GCM), Friendbot top-ups, per-account lock
+│   │       ├── kv.ts           # Shared Redis store and locks (Vercel)
 │   │       ├── db.ts           # JSON store (data/sailo.json, git-ignored)
 │   │       └── mailer.ts       # SMTP email (logs links in development)
 │   └── web/                    # Static frontend (no build step)
@@ -384,10 +396,11 @@ npm run default-demo      # default + recovery on Testnet
 | `SMTP_URL`, `MAIL_FROM` | Outgoing email for verification and password reset | Any SMTP provider (e.g. Resend, Gmail app password) |
 | `NODE_ENV` | `production` hides development email links in the UI | Hosting provider |
 | `TRUST_PROXY` | `1` trusts `X-Forwarded-For` (on by default in production) | Optional |
-| `PORTAL_VOYAGE_MS` | Portal voyage length, default `20000` | Optional |
+| `PORTAL_VOYAGE_MS` | Portal voyage length, default `60000` (the advance's Testnet transactions run during the voyage) | Optional |
 | `KV_REST_API_URL`, `KV_REST_API_TOKEN` (or `UPSTASH_REDIS_REST_*`, or `REDIS_URL`) | Shared Redis store for accounts, portal invoices and the demo run. Required on Vercel | Upstash via the Vercel Marketplace |
 | `WALLET_ENCRYPTION_KEY` | Encrypts the portal's custodial Testnet wallet keys. Defaults to a key derived from `TREASURY_SECRET`: keep that secret unchanged, or existing portal wallets can't be unlocked | Optional |
 | `PORTAL_ONCHAIN` | `0` runs new portal invoices in memory (simulated) instead of on Stellar Testnet | Optional |
+| `OPS_TOKEN` | Lets the operator switch the live site between Testnet and simulation (open `/app?ops=<token>` once). Unset on a deployed server: switching is off | Optional, recommended on deploy |
 | `PORT` | Server port, default `3000` | Optional |
 | `DEMO_TICK_MS` | AIS tick interval, default `1800` | Optional |
 | `SIM_LATENCY_MS` | Fake network delay in simulation mode, default `450` | Optional |
@@ -409,6 +422,7 @@ npm run default-demo      # default + recovery on Testnet
 
 ## What's next
 
+- **Per-invoice agent keys** (or a payee allow-list in the policy), so one leaked key can't touch other invoices.
 - **Live AIS** feeds plus terminal discharge data, so delivery doesn't rest on AIS alone (it can be spoofed).
 - **PHP stablecoin** settlement and an off-ramp, in place of testnet XLM at a demo rate.
 - **Investor pool contract** so many LPs can fund many invoices.

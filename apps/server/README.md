@@ -39,7 +39,7 @@ Every step is also a manual button in the Shipowner, Investor and Debtor views.
 - **Sample data.** Each new account gets a few private sample invoices, always simulated and labelled, so the portal is never empty.
 - **Forms.** The enquiry form (`POST /api/enquiry`) and newsletter (`POST /api/subscribe`) are saved on the server.
 
-With a Redis store configured (`KV_REST_API_URL` + `KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or `REDIS_URL`; see `src/kv.ts`), everything lives there and every instance shares it. Otherwise it is stored in `apps/server/data/sailo.json` (git-ignored): set `DATA_DIR` to a persistent disk on Render or Railway, or accounts reset on each deploy. `PORTAL_VOYAGE_MS` (default 20000) sets how long a portal voyage takes.
+With a Redis store configured (`KV_REST_API_URL` + `KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or `REDIS_URL`; see `src/kv.ts`), everything lives there and every instance shares it. Otherwise it is stored in `apps/server/data/sailo.json` (git-ignored): set `DATA_DIR` to a persistent disk on Render or Railway, or accounts reset on each deploy. `PORTAL_VOYAGE_MS` (default 60000) sets how long a portal voyage takes. The vessel sails when the investor's funding lands, the agent releases the advance once AIS shows it under way, and it berths when the last 3 readings are at the quay at ≤ 0.5 kn.
 
 ## Environment
 
