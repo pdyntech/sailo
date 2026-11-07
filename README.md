@@ -34,11 +34,11 @@
 
 <div align="center">
 
-| Team | GitHub | Discord |
-| :--- | :--- | :--- |
-| Helena | [@helenaherrero515](https://github.com/helenaherrero515) | TODO |
-| Ethan | [@thanreiz](https://github.com/thanreiz) | TODO |
-| Dia Aviles | [@krstndiane](https://github.com/krstndiane) | TODO |
+| Team | Role | GitHub | Discord |
+| :--- | :--- | :--- | :--- |
+| Helena | Fullstack Developer and DevOps | [@helenaherrero515](https://github.com/helenaherrero515) | `haenlenaeean` |
+| Ethan | Blockchain Developer | [@thanreiz](https://github.com/thanreiz) | `perrytot_` |
+| Dia Aviles | Project Manager and Frontend | [@krstndiane](https://github.com/krstndiane) | `kirs6103` |
 
 </div>
 
