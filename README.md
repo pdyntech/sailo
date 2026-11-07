@@ -421,8 +421,8 @@ npm run default-demo      # default + recovery on Testnet
 | Member | GitHub | Discord | Lane |
 | :-- | :-- | :-- | :-- |
 | Helena | [@helenaherrero515](https://github.com/helenaherrero515) | `haenlenaeean` | Fullstack Developer and DevOps |
-| Ethan | [@thanreiz](https://github.com/thanreiz) | `perrytot_` | Blockchain: Noir client, executor, guardrail, recovery, Testnet proof |
-| Dia Aviles | [@krstndiane](https://github.com/krstndiane) | `kirs6103` | Project manager, frontend |
+| Ethan | [@thanreiz](https://github.com/thanreiz) | `perrytot_` | Blockchain Developer |
+| Dia Aviles | [@krstndiane](https://github.com/krstndiane) | `kirs6103` | Project manager & Frontend Developer |
 
 Built on [Noir](https://github.com/noirx402/noir) agent contracts, [Velo](https://velo-build.dev) checkout and the [Stellar](https://stellar.org/) Testnet.
 
