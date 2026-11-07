@@ -16,12 +16,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Keypair } from "@stellar/stellar-sdk";
 import { execute, keypairSigner, normalizeError, type AgentDecision, type ExecutorContext, type NoirSigner, type Role } from "@noirxvelo/agent";
-import { computePayouts, fromStroops, phpToStroops, toStroops } from "@noirxvelo/shared";
+import { canonicalJson, computePayouts, fromStroops, phpToStroops, toStroops } from "@noirxvelo/shared";
 import { decide, type Facts } from "./agent.js";
 import { track } from "./background.js";
 import { db, save, withDb, type StoredWallet } from "./db.js";
 import { env, missingChainEnv } from "./env.js";
 import { INSTANCE_ID, withLock } from "./kv.js";
+import { TOTAL_TICKS, readingUnderway, readingsAfter, type Reading } from "./telemetry.js";
 import type { LogEntry, PortalInvoice, PState } from "./portal.js";
 import type { VerifiedEvent } from "./velo.js";
 import { chainClient, createWallet, topUp, walletSigner } from "./wallets.js";
@@ -69,6 +70,8 @@ export interface PortalChain {
   checkout: PortalCheckout | null;
   payment: PortalPayment | null;
   attestation: { sha256: string; signature: string; signer: string } | null;
+  /** ms epoch when the vessel sailed (set when the investor's funding lands). Absent on older invoices. */
+  sailedAt?: number | null;
 }
 
 export const MAX_ONCHAIN_FACE = 5_000_000; // PHP; 5,000 test XLM, so Friendbot top-ups keep up
@@ -78,13 +81,25 @@ const MAX_ATTEMPTS = 3;
 const now = () => new Date().toISOString();
 const xlm = (s: bigint) => `${fromStroops(s)} XLM`;
 
+// ---------- voyage (simulated AIS readings, same rule as the demo) ----------
+// The vessel sails when the funding lands and the advance runs during the voyage, so the voyage must outlast the
+// advance's Testnet transactions (about 30 s) or the vessel would already be in port when the advance lands.
+export const VOYAGE_MS = Number(process.env.PORTAL_VOYAGE_MS ?? 60_000);
+/** Time between two AIS readings. */
+const READING_MS = VOYAGE_MS / (TOTAL_TICKS - 1);
+/** When the voyage began: on-chain invoices sail when the funding lands; otherwise when the current state began. */
+export const voyageStart = (i: PortalInvoice): number => i.chain?.sailedAt ?? i.stateAt;
+export const voyageReadings = (i: PortalInvoice, now = Date.now()): Reading[] => readingsAfter(now - voyageStart(i), VOYAGE_MS);
+/** The agent's ADVANCE gate: some AIS reading shows the vessel under way. */
+export const hasSailed = (i: PortalInvoice, now = Date.now()): boolean => voyageReadings(i, now).some(readingUnderway);
+
 /** True when new portal invoices run on Testnet (platform wallets valid, not switched off). */
 export function chainAvailable(): boolean {
   return missingChainEnv().length === 0 && env("SIMULATE_CHAIN") !== "1" && env("PORTAL_ONCHAIN") !== "0";
 }
 
 export function newChain(): PortalChain {
-  return { nonce: randomBytes(8).toString("hex"), registered: false, job: null, attempts: 0, error: null, lastErrorAt: null, txs: [], escrowXlm: null, fundRequest: null, checkout: null, payment: null, attestation: null };
+  return { nonce: randomBytes(8).toString("hex"), registered: false, job: null, attempts: 0, error: null, lastErrorAt: null, txs: [], escrowXlm: null, fundRequest: null, checkout: null, payment: null, attestation: null, sailedAt: null };
 }
 
 let platformSigners: { AGENT: NoirSigner; TREASURY: NoirSigner } | null = null;
@@ -101,14 +116,15 @@ export const STEP_LABEL: Record<JobStep, string> = {
 };
 
 /** The chain step this invoice is waiting for, if any. */
-export function jobFor(i: PortalInvoice): JobStep | null {
+export function jobFor(i: PortalInvoice, now = Date.now()): JobStep | null {
   const c = i.chain;
   if (!c) return null;
   switch (i.state) {
     case "TOKENIZED":
       return !c.registered ? "register" : c.fundRequest ? "fund" : null;
     case "FUNDED":
-      return "advance";
+      // The advance is released once AIS shows the vessel under way, never before.
+      return hasSailed(i, now) ? "advance" : null;
     case "BERTHED":
       return c.payment?.verified ? "payin" : null;
     case "PAID":
@@ -122,7 +138,7 @@ export const jobRunning = (i: PortalInvoice, t = Date.now()): boolean => !!i.cha
 
 function isDue(i: PortalInvoice, t: number): boolean {
   const c = i.chain;
-  if (!c || !jobFor(i) || jobRunning(i, t)) return false;
+  if (!c || !jobFor(i, t) || jobRunning(i, t)) return false;
   if (c.error) {
     if (c.attempts >= MAX_ATTEMPTS) return false;
     if (t - (c.lastErrorAt ?? 0) < 8_000 * c.attempts) return false;
@@ -158,11 +174,18 @@ function setState(i: PortalInvoice, s: PState): void {
   i.stateAt = Date.now();
 }
 
-/** Signs the berthing record with the agent key, exactly like the demo's proof of delivery. */
-export function signBerthing(i: PortalInvoice): PortalChain["attestation"] {
+/** Signs the berthing record (with the 3 AIS readings that met the rule) with the agent key, like the demo's proof of delivery. */
+export function signBerthing(i: PortalInvoice, readings: Reading[]): PortalChain["attestation"] {
   const secret = env("AGENT_SECRET");
   if (!secret) return null;
-  const record = JSON.stringify({ invoiceId: i.id, hash: i.hash, port: i.port, berthedAt: now(), rule: "inside the port geofence at <= 0.5 kn for 3 consecutive readings" });
+  const record = canonicalJson({
+    invoiceId: i.id,
+    hash: i.hash,
+    port: i.port,
+    berthedAt: now(),
+    rule: "at the destination quay, SOG <= 0.5 kn for 3 consecutive readings (simulated AIS)",
+    readings: readings.slice(-3).map((r) => ({ seq: r.seq, sogKnots: r.sog.toFixed(1), navStatus: r.navStatus, atDestination: r.atDestination })),
+  });
   const sha256 = createHash("sha256").update(record, "utf8").digest("hex");
   const kp = Keypair.fromSecret(secret);
   return { sha256, signature: kp.sign(Buffer.from(sha256, "hex")).toString("base64"), signer: kp.publicKey() };
@@ -208,6 +231,8 @@ interface JobInput {
   txs: ChainTx[];
   payment: PortalPayment | null;
   attested: boolean;
+  registered: boolean;
+  sailed: boolean;
 }
 
 interface JobOutcome {
@@ -244,6 +269,8 @@ function claimJob(id: string): JobInput | null {
     txs: i.chain.txs.slice(),
     payment: i.chain.payment,
     attested: !!i.chain.attestation,
+    registered: i.chain.registered,
+    sailed: hasSailed(i),
   };
 }
 
@@ -270,6 +297,10 @@ function applyOutcome(inp: JobInput, out: JobOutcome): void {
   if (inp.step === "fund") c.fundRequest = null;
   // Only move the invoice if nobody else moved it meanwhile (a stale job taken over by another instance).
   if (out.next && i.state === inp.fromState) {
+    if (out.next === "FUNDED") {
+      c.sailedAt ??= Date.now();
+      log(i, { title: "Vessel sailed", text: `${i.vessel} left port. The agent releases the advance once AIS shows it under way.`, c: "payment_escrow" });
+    }
     if (out.next === "HOLD") {
       i.holdFrom = i.state;
       log(i, { title: "HOLD", text: out.holdReason ?? "The agent held this invoice.", c: "payment_escrow", decision: "HOLD", pay: [] });
@@ -277,6 +308,13 @@ function applyOutcome(inp: JobInput, out: JobOutcome): void {
     setState(i, out.next);
   }
   save();
+}
+
+/** ms until a funded invoice's vessel shows under way (null if it is not waiting for that). Call inside withDb. */
+function msUntilSail(id: string): number | null {
+  const i = db.invoices.find((x) => x.id === id);
+  if (!i?.chain || i.state !== "FUNDED" || hasSailed(i)) return null;
+  return Math.max(50, voyageStart(i) + READING_MS - Date.now() + 50);
 }
 
 const running = new Set<string>();
@@ -288,7 +326,13 @@ async function runJob(id: string): Promise<void> {
     // Several steps can follow each other without a user action (fund -> advance).
     for (let n = 0; n < 5; n++) {
       const inp = await withDb(() => claimJob(id));
-      if (!inp) return;
+      if (!inp) {
+        // Just funded: the advance becomes due on the first under-way AIS reading, a moment later.
+        const wait = await withDb(() => msUntilSail(id));
+        if (wait === null) return;
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
       const out = await perform(inp);
       await withDb(() => applyOutcome(inp, out));
       if (out.error) {
@@ -430,7 +474,14 @@ async function perform(inp: JobInput): Promise<JobOutcome> {
   return out;
 }
 
-/** ADVANCE or SETTLE: the agent proposes, the executor checks and pays. Resumes a partly landed payout safely. */
+/**
+ * ADVANCE or SETTLE: the agent proposes from observed facts, the executor checks and pays.
+ *
+ * Resuming is exact, not guessed. When a step starts, the invoice escrow holds exactly the step's total: the investor
+ * funds exactly the advance, which ADVANCE pays out in full, and the payin funds exactly the invoice value, which
+ * SETTLE pays out in full. Payouts always land in the same order, so `total - escrow` must equal the sum of the
+ * payouts that already landed (recorded or not). Any other balance is an anomaly: the invoice is held and nothing moves.
+ */
 async function agentPayout(
   inp: JobInput,
   out: JobOutcome,
@@ -446,6 +497,7 @@ async function agentPayout(
   if (!inp.funder) throw new Error("The investor has no wallet yet.");
   const signers: Record<"AGENT" | Role, NoirSigner> = { AGENT: P.AGENT, TREASURY: P.TREASURY, SHIPOWNER: walletSigner(inp.owner), LP: walletSigner(inp.funder) };
   const face = phpToStroops(BigInt(inp.face));
+  // Same order as the executor's settlement order (LP, shipowner, treasury).
   const expected: { role: Role; amount: bigint }[] =
     kind === "ADVANCE"
       ? [{ role: "SHIPOWNER", amount: pay.advance }]
@@ -455,12 +507,24 @@ async function agentPayout(
           { role: "TREASURY", amount: pay.fee },
         ];
   const total = expected.reduce((a, p) => a + p.amount, 0n);
+
+  // Which payouts already landed, from the escrow balance alone.
+  const escrow = await client.balanceOf(inp.hash);
+  const recorded = expected.map((p) => done("authorize", p.role));
+  const fresh = escrow >= total && !recorded.some(Boolean);
+  const landed = fresh ? 0 : landedPayouts(expected, total - escrow, recorded);
+  if (landed < 0) {
+    out.next = "HOLD";
+    out.holdReason = `The invoice escrow holds ${xlm(escrow)}, which matches no point of this ${kind} (it started at ${xlm(total)}). Nothing moved. Ops must check this invoice.`;
+    return;
+  }
+
   const facts: Facts = {
     invoiceId: inp.id,
     faceValue: face,
     status: kind === "ADVANCE" ? "FUNDED" : "PAID",
-    escrowFunded: true,
-    vesselUnderway: true, // the advance is released as the vessel sails
+    escrowFunded: true, // checked just above: the escrow is exactly where this step expects it
+    vesselUnderway: inp.sailed,
     berthed: inp.attested,
     paymentVerified: !!inp.payment?.verified,
     paymentAmountMatches: !!inp.payment?.amountMatches,
@@ -468,28 +532,27 @@ async function agentPayout(
     port: inp.port,
   };
   const prop = await decide(facts);
-  if (!prop) throw new Error("The agent found nothing to decide.");
   const label = (step: string, role: string, amount: bigint) => (step === "authorize" ? `payment_escrow.authorize (${role} ${xlm(amount)}, signed by the agent)` : `payment_escrow.claim (${role}, signed by the payee)`);
-  const decisionLog = (d: AgentDecision, extra: Record<string, unknown>) => ({
+  const decisionLog = (d: AgentDecision, engine: string, extra: Record<string, unknown>) => ({
     title: d.decision,
     text: d.reason,
     c: "payment_escrow" as const,
     decision: d.decision as "ADVANCE" | "SETTLE" | "HOLD",
     pay: d.payouts.map((p) => [p.role, Number(BigInt(p.amountStroops) / 10_000n)] as [Role, number]),
-    raw: { ...d, engine: prop.engine, ...extra },
+    raw: { ...d, engine, ...extra },
     txs: links(out.txs),
     onchain: true,
   });
 
-  if (prop.decision.decision === "HOLD") {
+  if (!prop || prop.decision.decision !== kind) {
     out.next = "HOLD";
-    out.holdReason = prop.decision.reason;
+    out.holdReason =
+      prop?.decision.reason ??
+      `The agent did not decide ${kind}: ${kind === "ADVANCE" ? "AIS does not show the vessel under way" : "the payment or the berthing attestation is missing"}. Nothing moved.`;
     return;
   }
 
-  const anyRecorded = expected.some((p) => done("authorize", p.role));
-  const escrow = await client.balanceOf(inp.hash);
-  if (!anyRecorded && escrow >= total) {
+  if (fresh) {
     // Normal path: the executor re-validates the decision, gates, amounts and policy, then pays.
     const ctx: ExecutorContext = {
       client,
@@ -498,8 +561,8 @@ async function agentPayout(
       addresses: { SHIPOWNER: signers.SHIPOWNER.publicKey, LP: signers.LP.publicKey, TREASURY: signers.TREASURY.publicKey },
       signers,
       gates: {
-        hashRegisteredByUs: true,
-        vesselUnderway: true,
+        hashRegisteredByUs: inp.registered,
+        vesselUnderway: inp.sailed,
         webhookVerified: !!inp.payment?.verified,
         webhookAmount: inp.payment ? toStroops(inp.payment.amountXlm) : undefined,
         berthingAttestation: inp.attested,
@@ -509,39 +572,71 @@ async function agentPayout(
     for (const st of r.steps) add(st.step, st.role, label(st.step, st.role, st.amount), { hash: st.hash, explorerUrl: st.explorerUrl });
     if (r.ok) {
       out.next = kind === "ADVANCE" ? "ADVANCED" : "SETTLED";
-      out.logs.push(decisionLog(prop.decision, { executor: "ok", finalEscrowXlm: r.finalEscrowBalance == null ? null : fromStroops(r.finalEscrowBalance) }));
+      out.logs.push(decisionLog(prop.decision, prop.engine, { executor: "ok", finalEscrowXlm: r.finalEscrowBalance == null ? null : fromStroops(r.finalEscrowBalance) }));
       return;
     }
     if (r.failure?.reason === "chain_error") throw new Error(`${r.failure.step}${r.failure.role ? ` ${r.failure.role}` : ""}: ${r.failure.detail ?? "chain error"}`);
     out.next = "HOLD";
-    out.holdReason = `The executor refused the agent’s ${kind}: ${r.refusal}${r.failure?.detail ? ` (${r.failure.detail})` : ""}. Nothing moved.`;
+    out.holdReason = `The executor refused the agent’s ${kind}: ${r.refusal}${r.failure?.detail ? ` (${r.failure.detail})` : ""}.${r.authorized.length ? "" : " Nothing moved."}`;
     return;
   }
 
-  // Resume: an earlier attempt landed part of the payout. Finish the authorizes, then the claims.
-  for (const p of expected) {
-    if (done("authorize", p.role)) continue;
-    const merchant = signers[p.role].publicKey;
-    const r = await client.authorizePayment({ agentSigner: signers.AGENT, deviceHash: inp.hash, merchant, amount: p.amount });
-    if (r.ok) {
-      add("authorize", p.role, label("authorize", p.role, p.amount), r);
-      continue;
-    }
-    // Refused for lack of escrow: an unrecorded authorize of ours may already have moved it to the payee.
-    const pending = await client.pendingBalance(merchant).catch(() => 0n);
-    if (r.reason === "insufficient_escrow" && pending >= p.amount) continue;
+  // Resume: the executor's gates and payout check, then only the payouts that have not landed, in order.
+  const gate = resumeGate(kind, inp);
+  const proposed = prop.decision.payouts.map((p) => `${p.role}:${p.amountStroops}`).sort().join(",");
+  const want = expected.map((p) => `${p.role}:${p.amount}`).sort().join(",");
+  if (gate || proposed !== want) {
     out.next = "HOLD";
-    out.holdReason = `Resuming the ${kind}, the contract refused ${p.role} ${xlm(p.amount)} (${r.reason}). Nothing more moved.`;
+    out.holdReason = `Resuming the ${kind} was refused: ${gate ?? `the agent's payouts (${proposed}) are not the computed ones (${want})`}. Nothing more moved.`;
     return;
+  }
+  for (const p of expected.slice(landed)) {
+    const r = await client.authorizePayment({ agentSigner: signers.AGENT, deviceHash: inp.hash, merchant: signers[p.role].publicKey, amount: p.amount });
+    if (!r.ok) {
+      out.next = "HOLD";
+      out.holdReason = `Resuming the ${kind}, the contract refused ${p.role} ${xlm(p.amount)} (${r.reason}). Nothing more moved.`;
+      return;
+    }
+    add("authorize", p.role, label("authorize", p.role, p.amount), r);
   }
   for (const p of expected) {
     if (done("claim", p.role)) continue;
     try {
       add("claim", p.role, label("claim", p.role, p.amount), await client.claim(signers[p.role]));
     } catch (e) {
+      // An earlier attempt's claim landed without being recorded.
       if (normalizeError(e).errorName !== "NothingToClaim") throw e;
     }
   }
   out.next = kind === "ADVANCE" ? "ADVANCED" : "SETTLED";
-  out.logs.push(decisionLog(prop.decision, { executor: "resumed after a partial run" }));
+  const unrecorded = expected.slice(0, landed).filter((_, k) => !recorded[k]).map((p) => p.role);
+  out.logs.push(
+    decisionLog(prop.decision, prop.engine, {
+      executor: "resumed after a partial run",
+      alreadyLanded: expected.slice(0, landed).map((p) => p.role),
+      ...(unrecorded.length ? { landedWithoutRecordedHash: unrecorded } : {}),
+    }),
+  );
+}
+
+/**
+ * How many of `payouts` (in order) already landed, given how much left the escrow. -1 if that amount is not the sum
+ * of a leading run of payouts, if nothing landed, or if a recorded authorize is not among the landed ones.
+ */
+export function landedPayouts(payouts: { amount: bigint }[], spent: bigint, recorded: boolean[]): number {
+  let sum = 0n;
+  for (let k = 1; k <= payouts.length; k++) {
+    sum += payouts[k - 1]!.amount;
+    if (sum === spent) return recorded.some((r, i) => r && i >= k) ? -1 : k;
+  }
+  return -1;
+}
+
+/** The executor's preconditions, for a resumed payout. Returns the failed one, or null. */
+function resumeGate(kind: "ADVANCE" | "SETTLE", inp: JobInput): string | null {
+  if (!inp.registered) return "the invoice hash is not registered";
+  if (kind === "ADVANCE") return inp.sailed ? null : "AIS does not show the vessel under way";
+  if (!inp.payment?.verified) return "no verified payment";
+  if (!inp.payment.amountMatches) return "the payment does not match the invoice";
+  return inp.attested ? null : "no berthing attestation";
 }

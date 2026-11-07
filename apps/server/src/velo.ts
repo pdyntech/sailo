@@ -21,9 +21,11 @@ async function loadVelo(): Promise<VeloModule | null> {
   return veloModule;
 }
 
-/** Secret used to verify webhooks. Without VELO_WEBHOOK_SECRET, a per-boot demo secret is used (simulated deliveries only). */
+/** Secret used to verify Velo webhooks. Without VELO_WEBHOOK_SECRET it is a random per-boot value, so nothing verifies. */
 const generatedSecret = randomBytes(32).toString("hex");
 export const webhookSecret = (): string => env("VELO_WEBHOOK_SECRET") ?? generatedSecret;
+/** Signs and verifies simulated deliveries only. Never the real secret, so a simulated payment can't pass as Velo's. */
+const simulatedSecret = randomBytes(32).toString("hex");
 export const usingRealWebhookSecret = (): boolean => !!env("VELO_WEBHOOK_SECRET");
 export const veloCheckoutConfigured = (): boolean => !!env("VELO_API_KEY");
 
@@ -67,6 +69,27 @@ export async function createCheckout(o: { invoiceId: string; amountXlm: string; 
   return { id, checkoutUrl: str("checkoutUrl"), status: str("status") ?? "created", receiverAddress: str("receiverAddress"), simulated: false, amount: o.amountXlm, asset, createdAt };
 }
 
+export interface PaymentStatus {
+  id: string;
+  status: string;
+  amount: string;
+  asset: string;
+}
+
+/**
+ * Payment status straight from Velo (`velo.paymentIntents.retrieve`), the source of truth for whether a
+ * checkout is paid. Returns null when there is no VELO_API_KEY (simulated checkouts have no real intent).
+ */
+export async function retrievePaymentStatus(paymentIntentId: string): Promise<PaymentStatus | null> {
+  const apiKey = env("VELO_API_KEY");
+  if (!apiKey) return null;
+  const mod = await loadVelo();
+  if (!mod) throw new Error("@carts1024/velo-sdk is not installed (run npm install)");
+  const velo = new mod.Velo({ apiKey, environment: "testnet" });
+  const pi = await velo.paymentIntents.retrieve(paymentIntentId);
+  return { id: pi.id ?? pi.paymentIntentId, status: pi.status, amount: pi.amount, asset: pi.asset };
+}
+
 export interface VerifiedEvent {
   id: string;
   type: string;
@@ -96,9 +119,9 @@ function manualVerify(payload: string, header: string, secret: string, tolerance
 }
 
 /** Verifies the raw body with the Velo SDK (HMAC fallback only if the SDK is not installed). */
-export async function verifyWebhook(payload: string, signature: string | null): Promise<VerifiedEvent> {
+export async function verifyWebhook(payload: string, signature: string | null, opts: { simulated?: boolean } = {}): Promise<VerifiedEvent> {
   if (!signature) throw new WebhookRejected("missing x-velo-signature");
-  const secret = webhookSecret();
+  const secret = opts.simulated ? simulatedSecret : webhookSecret();
   const mod = await loadVelo();
   let event: unknown;
   let verifiedBy: VerifiedEvent["verifiedBy"] = "velo-sdk";
@@ -133,6 +156,6 @@ export function signSimulatedDelivery(pi: { id: string; amount: string; asset: s
     paymentIntent: { ...pi, status: "paid", merchantName: "VisMin Freight Factoring", createdAt: now, updatedAt: now },
   });
   const t = Math.floor(Date.now() / 1000);
-  const v1 = createHmac("sha256", webhookSecret()).update(`${t}.${body}`).digest("hex");
+  const v1 = createHmac("sha256", simulatedSecret).update(`${t}.${body}`).digest("hex");
   return { body, signature: `t=${t},v1=${v1}`, deliveryId };
 }

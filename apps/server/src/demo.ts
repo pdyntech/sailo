@@ -369,7 +369,8 @@ function facts(): Facts {
     invoiceId: state.invoice.id,
     faceValue: V,
     status: state.status,
-    escrowFunded: true,
+    // Last on-chain escrow read (refreshed after every funding): it must cover the advance.
+    escrowFunded: state.escrowXlm != null && toStroops(state.escrowXlm) >= PAYOUTS.advance,
     vesselUnderway: isUnderway(state.voyage.latest ?? undefined) || (state.voyage.running && ticks.some((t) => isUnderway(t))),
     berthed: state.voyage.berthed,
     paymentVerified: !!state.payment?.verified,
@@ -425,6 +426,13 @@ function recordDecision(proposal: AgentDecision | null, engine: string, r: Execu
 /** The agent looks at the facts and acts if a decision is due. Safe to call often. */
 async function agentStep(): Promise<void> {
   if (!state.config.chainReady || !state.invoice.hash) return;
+  if (state.status === "FUNDED" && (state.escrowXlm == null || toStroops(state.escrowXlm) < PAYOUTS.advance)) {
+    try {
+      state.escrowXlm = xlm(await getClient().balanceOf(state.invoice.hash)); // the last read failed or is stale
+    } catch {
+      /* keep the last value: no ADVANCE until the escrow is confirmed */
+    }
+  }
   const f = facts();
   const prop = await decide(f);
   if (!prop) return;
@@ -662,7 +670,7 @@ export function simulateWebhook() {
     log("info", `Simulated payment.succeeded signed (HMAC-SHA256) and verified like a delivery to /api/webhooks/velo.`);
     let ev: VerifiedEvent;
     try {
-      ev = await verifyWebhook(d.body, d.signature);
+      ev = await verifyWebhook(d.body, d.signature, { simulated: true });
     } catch (e) {
       throw new StepError(`webhook rejected: ${e instanceof Error ? e.message : e}`);
     }

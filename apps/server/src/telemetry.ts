@@ -134,3 +134,35 @@ export function isBerthed(ticks: Tick[]): boolean {
   if (ticks.length < 3) return false;
   return ticks.slice(-3).every((t) => t.inGeofence && t.sog <= 0.5);
 }
+
+// ---------- route-agnostic readings (portal voyages to any port) ----------
+// Portal routes are free text ("Manila to Davao"), so there are no coordinates to plot. These readings replay the
+// same speed script and apply the same rule as the Cebu demo: at the destination quay, SOG <= 0.5 kn, 3 in a row.
+
+export interface Reading {
+  seq: number;
+  sog: number;
+  navStatus: string;
+  progress: number;
+  atDestination: boolean;
+}
+
+export function readingAt(seq: number): Reading {
+  const s = SCRIPT[Math.min(seq, SCRIPT.length - 1)]!;
+  return { seq, sog: s.sog, navStatus: s.nav, progress: s.f, atDestination: s.f >= 1 };
+}
+
+/** Readings received `elapsedMs` into a voyage that lasts `voyageMs` (one every voyageMs / (TOTAL_TICKS - 1)). */
+export function readingsAfter(elapsedMs: number, voyageMs: number): Reading[] {
+  if (elapsedMs < 0) return [];
+  const last = Math.min(TOTAL_TICKS - 1, Math.floor((elapsedMs * (TOTAL_TICKS - 1)) / voyageMs));
+  return Array.from({ length: last + 1 }, (_, i) => readingAt(i));
+}
+
+export const readingUnderway = (r: Reading): boolean => r.sog >= 3 && !r.atDestination;
+
+/** Same rule as isBerthed: the last 3 readings are at the destination quay at <= 0.5 kn. */
+export function readingsBerthed(rs: Reading[]): boolean {
+  if (rs.length < 3) return false;
+  return rs.slice(-3).every((r) => r.atDestination && r.sog <= 0.5);
+}

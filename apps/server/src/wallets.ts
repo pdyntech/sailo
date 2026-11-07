@@ -3,7 +3,8 @@
  *
  * - Each shipowner and investor gets a custodial Testnet wallet the first time it is needed. Friendbot funds
  *   it with 10,000 test XLM. The secret is encrypted with AES-256-GCM (key: WALLET_ENCRYPTION_KEY, or one
- *   derived from TREASURY_SECRET) before it is stored. Testnet only: these wallets never hold real money.
+ *   derived from TREASURY_SECRET) before it is stored. Wallets stored under the derived key stay readable after
+ *   WALLET_ENCRYPTION_KEY is set. Testnet only: these wallets never hold real money.
  * - topUp() refills a wallet from Friendbot by funding a throwaway account and merging it into the target.
  * - withAccount() serialises transactions per source account across every server instance, so two instances
  *   never race on the same account's sequence number.
@@ -19,9 +20,17 @@ const HORIZON = "https://horizon-testnet.stellar.org";
 const FRIENDBOT = "https://friendbot.stellar.org";
 const STROOPS = 10_000_000n;
 
-function encKey(): Buffer {
-  const k = env("WALLET_ENCRYPTION_KEY") ?? `derived:${env("TREASURY_SECRET") ?? "sailo-dev-only"}`;
-  return createHash("sha256").update(`sailo-wallets|${k}`).digest();
+const keyFrom = (k: string): Buffer => createHash("sha256").update(`sailo-wallets|${k}`).digest();
+/** The key used before WALLET_ENCRYPTION_KEY existed (derived from the treasury secret). Still read, never written once a key is set. */
+const legacyKey = (): Buffer => keyFrom(`derived:${env("TREASURY_SECRET") ?? "sailo-dev-only"}`);
+/** Encrypts with WALLET_ENCRYPTION_KEY when set, so a leaked treasury secret no longer unlocks the wallets. */
+const encKey = (): Buffer => {
+  const k = env("WALLET_ENCRYPTION_KEY");
+  return k ? keyFrom(k) : legacyKey();
+};
+
+if (!env("WALLET_ENCRYPTION_KEY") && process.env.NODE_ENV === "production") {
+  console.warn("WALLET_ENCRYPTION_KEY is not set: portal wallet secrets are encrypted with a key derived from TREASURY_SECRET.");
 }
 
 export function encryptSecret(secret: string): string {
@@ -34,9 +43,18 @@ export function encryptSecret(secret: string): string {
 export function decryptSecret(enc: string): string {
   const [v, iv, tag, body] = enc.split(".");
   if (v !== "v1" || !iv || !tag || !body) throw new Error("wallet: unknown secret format");
-  const d = createDecipheriv("aes-256-gcm", encKey(), Buffer.from(iv, "base64"));
-  d.setAuthTag(Buffer.from(tag, "base64"));
-  return Buffer.concat([d.update(Buffer.from(body, "base64")), d.final()]).toString("utf8");
+  // Current key first, then the legacy one, so setting WALLET_ENCRYPTION_KEY keeps older wallets readable.
+  const keys = [encKey(), legacyKey()];
+  for (const key of keys) {
+    try {
+      const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64"));
+      d.setAuthTag(Buffer.from(tag, "base64"));
+      return Buffer.concat([d.update(Buffer.from(body, "base64")), d.final()]).toString("utf8");
+    } catch {
+      /* wrong key: GCM authentication fails, try the next one */
+    }
+  }
+  throw new Error("wallet: cannot decrypt this wallet secret (was WALLET_ENCRYPTION_KEY or TREASURY_SECRET changed?)");
 }
 
 export const walletSigner = (w: StoredWallet): NoirSigner => keypairSigner(decryptSecret(w.secretEnc));
