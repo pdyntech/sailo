@@ -13,6 +13,7 @@
     "provision": "tsx scripts/provision.ts",
     "lifecycle": "tsx scripts/lifecycle.ts",
     "default-demo": "tsx scripts/default-demo.ts",
+    "check-mail": "tsx scripts/check-mail.ts",
     "test": "vitest run",
     "start": "npm run start -w @noirxvelo/server",
     "dev": "npm run dev -w @noirxvelo/server",
