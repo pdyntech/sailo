@@ -26,6 +26,7 @@ import {
   chainAvailable,
   jobFor,
   jobRunning,
+  isAgentHold,
   needsRetry,
   newChain,
   recordPayment,
@@ -430,6 +431,8 @@ export interface InvoiceView {
   chainBusy: string | null;
   chainError: string | null;
   canRetry: boolean;
+  /** On hold by the agent's judgment: the parties can ask it to look again. */
+  agentHold: boolean;
   txs: { label: string; hash: string; url: string; at: string }[];
   /** Velo checkout to open, for the cargo owner, while the payment is outstanding. */
   checkoutUrl: string | null;
@@ -470,6 +473,7 @@ function view(i: PortalInvoice, u: User, now: number): InvoiceView {
     chainBusy: i.chain ? (jobRunning(i, now) && i.chain.job ? STEP_LABEL[i.chain.job.step] : jobFor(i) && !i.chain.error ? STEP_LABEL[jobFor(i)!] : null) : null,
     chainError: i.chain?.error ?? null,
     canRetry: needsRetry(i),
+    agentHold: isAgentHold(i),
     txs: (i.chain?.txs ?? []).map((t) => ({ label: t.label, hash: t.hash, url: t.url, at: t.at })),
     checkoutUrl: u.role === "Cargo owner" && i.chain?.checkout?.url && !i.chain.payment ? i.chain.checkout.url : null,
     paymentPending: !!i.chain?.checkout && !i.chain.payment,
@@ -573,8 +577,15 @@ export function recordCheckout(u: User, id: unknown, session: CheckoutSession, e
 export function retryInvoice(u: User, id: unknown): InvoiceView {
   const i = find(u, id);
   if (!needsRetry(i)) throw new HttpError(409, "Nothing to retry.");
+  const held = isAgentHold(i);
   resetRetry(i);
-  log(i, { title: "Retrying", text: `${u.company || u.name} asked to retry: ${STEP_LABEL[jobFor(i)!]}.`, c: "payment_escrow", onchain: true });
+  const step = jobFor(i);
+  log(i, {
+    title: held ? "Asked the agent again" : "Retrying",
+    text: held ? `${u.company || u.name} asked the agent to look at this invoice again. It decides on the same evidence and may hold again.` : `${u.company || u.name} asked to retry${step ? `: ${STEP_LABEL[step]}` : ""}.`,
+    c: "payment_escrow",
+    onchain: true,
+  });
   save();
   return view(i, u, Date.now());
 }

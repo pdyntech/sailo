@@ -72,6 +72,8 @@ export interface PortalChain {
   attestation: { sha256: string; signature: string; signer: string } | null;
   /** ms epoch when the vessel sailed (set when the investor's funding lands). Absent on older invoices. */
   sailedAt?: number | null;
+  /** The invoice is on HOLD because the agent judged the evidence needed a second look (not a failed check). */
+  agentHold?: boolean;
 }
 
 export const MAX_ONCHAIN_FACE = 5_000_000; // PHP; 5,000 test XLM, so Friendbot top-ups keep up
@@ -153,12 +155,22 @@ export function dueJobs(): string[] {
   return db.invoices.filter((i) => isDue(i, t)).map((i) => i.id);
 }
 
-/** True if the invoice failed its step too often and waits for someone to press Retry. */
-export const needsRetry = (i: PortalInvoice): boolean => !!i.chain?.error && i.chain.attempts >= MAX_ATTEMPTS && !!jobFor(i);
+/** True if the invoice failed its step too often, or the agent held it for a second look, and waits for Retry. */
+export const needsRetry = (i: PortalInvoice): boolean =>
+  (!!i.chain?.error && i.chain.attempts >= MAX_ATTEMPTS && !!jobFor(i)) || isAgentHold(i);
 
-/** Clears the error so the step runs again. Call inside withDb. */
+/** On HOLD by the agent's judgment, from a step it can retake (nothing moved, so asking again is safe). */
+export const isAgentHold = (i: PortalInvoice): boolean => i.state === "HOLD" && !!i.chain?.agentHold && (i.holdFrom === "FUNDED" || i.holdFrom === "PAID");
+
+/** Clears the error (or the agent's hold) so the step runs again. Call inside withDb. */
 export function resetRetry(i: PortalInvoice): void {
   if (!i.chain) return;
+  if (isAgentHold(i)) {
+    // Back to the state the agent held, so it decides again on the same evidence. No money moved on the hold.
+    i.state = i.holdFrom!;
+    i.holdFrom = null;
+    i.chain.agentHold = false;
+  }
   i.chain.error = null;
   i.chain.attempts = 0;
   i.chain.lastErrorAt = null;
@@ -241,6 +253,8 @@ interface JobOutcome {
   error?: string;
   next?: PState;
   holdReason?: string;
+  /** The hold is the agent's judgment, which the invoice's parties may ask it to reconsider. */
+  reviewableHold?: boolean;
   registered?: boolean;
   escrowXlm?: string;
 }
@@ -302,6 +316,7 @@ function applyOutcome(inp: JobInput, out: JobOutcome): void {
       log(i, { title: "Vessel sailed", text: `${i.vessel} left port. The agent releases the advance once AIS shows it under way.`, c: "payment_escrow" });
     }
     if (out.next === "HOLD") {
+      c.agentHold = !!out.reviewableHold;
       i.holdFrom = i.state;
       log(i, { title: "HOLD", text: out.holdReason ?? "The agent held this invoice.", c: "payment_escrow", decision: "HOLD", pay: [] });
     }
@@ -530,6 +545,10 @@ async function agentPayout(
     paymentAmountMatches: !!inp.payment?.amountMatches,
     vessel: inp.vessel,
     port: inp.port,
+    voyageNote:
+      kind === "ADVANCE"
+        ? "AIS readings arrive at the normal interval and show the vessel under way. This route has no plotted sea lane, so positions are not compared with one."
+        : "AIS readings arrived at the normal interval for the whole voyage, with no gaps; the last 3 were at the destination quay at <= 0.5 kn. This route has no plotted sea lane, so positions are not compared with one.",
   };
   const prop = await decide(facts);
   const label = (step: string, role: string, amount: bigint) => (step === "authorize" ? `payment_escrow.authorize (${role} ${xlm(amount)}, signed by the agent)` : `payment_escrow.claim (${role}, signed by the payee)`);
@@ -546,6 +565,7 @@ async function agentPayout(
 
   if (!prop || prop.decision.decision !== kind) {
     out.next = "HOLD";
+    out.reviewableHold = !!prop?.reviewable;
     out.holdReason =
       prop?.decision.reason ??
       `The agent did not decide ${kind}: ${kind === "ADVANCE" ? "AIS does not show the vessel under way" : "the payment or the berthing attestation is missing"}. Nothing moved.`;

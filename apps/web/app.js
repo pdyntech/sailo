@@ -112,6 +112,8 @@ const BUSY_NAMES = {
   default: "Simulate default",
   reset: "Reset",
   "run-demo": "Run Demo",
+  "run-demo/ais-dark": "Run Demo (AIS goes dark)",
+  "release-hold": "Ops review: release hold",
   "fast-forward": "Fast-forward",
   "mode/simulation": "Switch to simulation",
   "mode/testnet": "Switch to Testnet",
@@ -186,7 +188,9 @@ function stage() {
     BERTHED: ["Cargo delivered", "The ship berthed in Cebu and the agent signed a proof of delivery. Now the cargo owner pays the invoice.", S.checkout ? ["simulate-webhook", "Debtor pays (Velo webhook)"] : ["checkout", "Create Velo checkout for the debtor"]],
     PAID: ["Debtor paid", "Velo confirmed the payment with a signed webhook. The agent is checking the split and settling.", null],
     SETTLED: ["Settled", `Investor repaid ${fmtXlm(p.lpRepayment)}, shipowner rebated ${fmtXlm(p.rebate)}, treasury fee ${fmtXlm(p.fee)}. Escrow is empty.`, null],
-    HOLD: ["On hold", "The agent stopped because a check failed. No money moved. The reason is in the decision list.", null],
+    HOLD: canRelease()
+      ? ["On hold for review", "The agent judged that the evidence needs a second look before it pays. No money moved. An operator can review and release the hold; the agent then decides again.", ["release-hold", "Ops review: release hold"]]
+      : ["On hold", "The agent stopped because a check failed. No money moved. The reason is in the decision list.", null],
     DEFAULT: ["Default recovered", "The debtor did not pay. Ops revoked the agent and swept the escrow back to the treasury.", null],
   };
   const [title, text, next] = map[st] || [st, "", null];
@@ -199,6 +203,7 @@ function stage() {
 
 const SCENARIOS = () => [
   { act: "run-demo", label: "Clean settlement", text: "The whole voyage, from invoice to payout, with no clicks (about 90 seconds).", enabled: chainReady() },
+  { act: "run-demo/ais-dark", label: "AIS goes dark mid-voyage", text: "AIS drops out for about 8 hours and the ship reappears about 14 km off the sea lane: under the hard limits, so the rules alone would pay. The agent decides whether to.", enabled: chainReady() },
   { act: "guardrail", label: "Agent tries to overspend", text: `A single ${fmtXlm(S.invoice.faceXlm)} payout against the ${fmtXlm(S.invoice.payouts.maxAmount)} cap. The contract refuses it.`, enabled: chainReady() && !!S.invoice.hash, hint: "available after the invoice is registered" },
   { act: "default", label: "Debtor never pays", text: "Ops revokes the agent and the escrow is swept back to the treasury.", enabled: chainReady() && ["FUNDED", "ADVANCED", "IN_TRANSIT", "BERTHED", "HOLD"].includes(S.status), hint: "available once the advance is funded" },
 ];
@@ -206,7 +211,7 @@ const SCENARIOS = () => [
 function renderGuide() {
   const g = stage();
   const st = S.status;
-  const done = ["SETTLED", "HOLD", "DEFAULT"].includes(st);
+  const done = ["SETTLED", "HOLD", "DEFAULT"].includes(st) && !canRelease();
   const working = S.busy ? `<p class="guide-busy" role="status"><span class="spin" aria-hidden="true"></span>${esc(S.busy)}…${S.voyage.running ? " · voyage streaming" : ""}</p>` : S.voyage.running ? `<p class="guide-busy" role="status"><span class="spin" aria-hidden="true"></span>Voyage streaming, the agent is watching AIS…</p>` : "";
   const primary = done
     ? button("run-demo", "▶ Run it again", { cls: "primary lg", enabled: chainReady() })
@@ -493,6 +498,11 @@ function renderKpis() {
 const seen = new Set();
 const fresh = new Set();
 let seenInit = false;
+// Who made the call: the model (Claude) or the rules.
+const engineLabel = (e) => (/^claude-/.test(e || "") ? `AI agent · ${e}` : e || "");
+const lastHold = () => [...(S.decisions || [])].reverse().find((d) => d.decision === "HOLD");
+const canRelease = () => S.status === "HOLD" && !!lastHold()?.reviewable;
+
 function trace(d) {
   const ok = (t) => ({ t, s: "ok" });
   const bad = (t) => ({ t, s: "bad" });
@@ -504,6 +514,10 @@ function trace(d) {
   if (d.decision === "BERTHED") return [ok("Inside the 800 m Cebu geofence"), ok("Speed ≤ 0.5 kn for 3 readings"), ok("Record hashed and signed by the agent key")];
   if (d.decision === "REFUSED") return [ok(`Tried one ${fmtXlm(S.invoice.faceXlm)} payout`), bad(`checkPayment → ${d.refusal || "over_limit"}`), bad("SDK refused at simulation · no transaction, no fee")];
   if (d.decision === "DEFAULT") return [ok("Ops-triggered default"), ok("Agent revoked"), ok("Escrow swept to treasury")];
+  if (d.decision === "HOLD" && d.reviewable)
+    return /^claude-/.test(d.engine || "")
+      ? [ok("Rules: payout permitted (checks passed, under hard limits)"), bad("Agent judged the evidence needs a second look"), ok("No money moved · an ops review can release it")]
+      : [bad("Hard limit reached (AIS dark or off the sea lane)"), ok("No money moved · an ops review can release it")];
   if (d.refusal) return [bad(`Stopped: ${d.refusal}`), ok("No money moved")];
   return [];
 }
@@ -522,8 +536,9 @@ function renderDecisions() {
       const txs = d.txs.map((t) => `<div><span class="muted">${esc(t.step)} ${esc(t.role)}</span> · ${txLink(t)}</div>`).join("");
       const refusal = d.refusal ? `<div class="small refusal ${d.decision === "REFUSED" ? "REFUSED" : ""}">refusal: <b>${esc(d.refusal)}</b>${d.detail ? ` · ${esc(d.detail)}` : ""}</div>` : "";
       return `<article class="dec" data-dec="${esc(d.id)}" tabindex="0" aria-haspopup="dialog">
-        <div class="dec-head"><span class="badge b-${esc(d.decision)}">${esc(d.decision)}</span>${d.requested !== d.decision ? `<span class="engine">requested ${esc(d.requested)}</span>` : ""}<span class="engine">${esc(d.engine)}</span><span class="dec-time">${esc(time(d.at))}</span></div>
+        <div class="dec-head"><span class="badge b-${esc(d.decision)}">${esc(d.decision)}</span>${d.requested !== d.decision ? `<span class="engine">requested ${esc(d.requested)}</span>` : ""}<span class="engine">${esc(engineLabel(d.engine))}</span><span class="dec-time">${esc(time(d.at))}</span></div>
         <div class="dec-reason">${esc(d.reason)}</div>
+        ${d.risks?.length ? `<ul class="small muted" style="margin:6px 0 0 18px">${d.risks.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
         ${(() => { const tr = trace(d); return tr.length ? `<ol class="trace${i === 0 && fresh.has(d.id) ? " live" : ""}" aria-label="Checks">${tr.map((x, k) => `<li class="${x.s}" style="--i:${k}"><span aria-hidden="true">${x.s === "ok" ? "✓" : "✕"}</span>${esc(x.t)}</li>`).join("")}</ol>` : ""; })()}
         ${pills ? `<div class="pills">${pills}</div>` : ""}
         ${refusal}
@@ -547,6 +562,8 @@ function renderOps() {
   const st = S.status;
   const actions = [
     button("run-demo", "▶ Run Demo", { cls: "gold", enabled: chainReady() }),
+    button("run-demo/ais-dark", "▶ Run Demo: AIS goes dark", { enabled: chainReady() }),
+    button("release-hold", "Ops review: release hold", { enabled: canRelease(), title: "Operator only: needs the ops token" }),
     button("fast-forward", "⏩ Fast-forward to Cebu", { enabled: S.voyage.running || st === "FUNDED" }),
     button("simulate-webhook", "Simulate Velo webhook", { enabled: st !== "DRAFT" && !S.payment }),
     button("guardrail", "Trigger guardrail (1,000 XLM)", { enabled: chainReady() && !!S.invoice.hash }),
@@ -611,7 +628,7 @@ function attestationHtml(a) {
 function openDecision(id) {
   const d = (S.decisions || []).find((x) => x.id === id);
   if (!d) return;
-  let html = `<div class="kv"><div class="k">Decision</div><div class="v"><span class="badge b-${esc(d.decision)}">${esc(d.decision)}</span> ${d.requested !== d.decision ? `(requested ${esc(d.requested)})` : ""}</div><div class="k">Engine</div><div class="v">${esc(d.engine)}</div><div class="k">Time</div><div class="v">${esc(d.at)}</div><div class="k">Executor result</div><div class="v">${d.ok ? "executed" : "refused / held"}${d.refusal ? ` · ${esc(d.refusal)}` : ""}${d.detail ? ` · ${esc(d.detail)}` : ""}</div></div>`;
+  let html = `<div class="kv"><div class="k">Decision</div><div class="v"><span class="badge b-${esc(d.decision)}">${esc(d.decision)}</span> ${d.requested !== d.decision ? `(requested ${esc(d.requested)})` : ""}</div><div class="k">Engine</div><div class="v">${esc(engineLabel(d.engine))}</div><div class="k">Time</div><div class="v">${esc(d.at)}</div><div class="k">Executor result</div><div class="v">${d.ok ? "executed" : "refused / held"}${d.refusal ? ` · ${esc(d.refusal)}` : ""}${d.detail ? ` · ${esc(d.detail)}` : ""}</div></div>`;
   if (d.txs.length) html += `<h3>Transactions</h3><div class="kv">${d.txs.map((t) => `<div class="k">${esc(t.step)} ${esc(t.role)} ${esc(t.xlm)} XLM</div><div class="v">${txLink(t)}</div>`).join("")}</div>`;
   if (d.proposal) html += `<h3>AgentDecision JSON (PRD §8.3, roles only, never addresses)</h3><pre class="json">${pretty(d.proposal)}</pre>`;
   if (d.attestation) html += `<h3>Berthing attestation</h3>${attestationHtml(d.attestation)}`;

@@ -17,6 +17,10 @@ export interface Tick {
   /** Leg name shown in the HUD. */
   leg: string;
   inGeofence: boolean;
+  /** Voyage time of this reading, hours since departure (the demo compresses a ~27 h voyage). */
+  voyageHour: number;
+  /** Distance from the planned sea lane, km. */
+  laneKm: number;
   at: string;
 }
 
@@ -95,14 +99,27 @@ const SCRIPT: { f: number; sog: number; nav: string }[] = [
 ];
 
 export const TOTAL_TICKS = SCRIPT.length;
+/** Voyage hours between two AIS readings: the route at a 14-knot service speed, spread over the script. */
+export const HOURS_PER_TICK = TOTAL / 1852 / 14 / (TOTAL_TICKS - 1);
 
-export function makeTick(seq: number): Tick {
+/** The planned sea lane, sampled every ~0.7 km. */
+const LANE = Array.from({ length: 1001 }, (_, i) => pointAt(i / 1000));
+export const laneKm = (p: { lat: number; lng: number }): number => Math.min(...LANE.map((q) => distanceM(p, q))) / 1000;
+
+/**
+ * Demo scenario: AIS goes dark mid-voyage (readings 5-7 never arrive, about 7.7 voyage hours) and the vessel
+ * reappears about 14 km off the sea lane. Both stay under the hard limits (12 h, 50 km), so the rules alone would pay.
+ */
+export const AIS_DARK = { dark: new Set([5, 6, 7]), reappear: 8, offsetKm: 18 };
+
+export function makeTick(seq: number, opts: { offsetKm?: number } = {}): Tick {
   const s = SCRIPT[Math.min(seq, SCRIPT.length - 1)]!;
   const p = pointAt(s.f);
   // Berthed ticks sit at the quay, slightly inside the geofence, with tiny jitter.
   const jitter = s.f >= 1 ? (seq % 3) * 0.00012 : 0;
+  const east = opts.offsetKm ? opts.offsetKm / (111.32 * Math.cos(rad(p.lat))) : 0;
   const lat = s.f >= 1 ? 10.2992 + jitter : p.lat;
-  const lng = s.f >= 1 ? 123.9061 - jitter : p.lng;
+  const lng = s.f >= 1 ? 123.9061 - jitter : p.lng + east;
   const pos = { lat, lng };
   return {
     seq,
@@ -114,17 +131,18 @@ export function makeTick(seq: number): Tick {
     progress: s.f,
     leg: s.f >= 1 ? CEBU.name : s.f === 0 ? ORIGIN.name : p.leg,
     inGeofence: inCebuGeofence(pos),
+    voyageHour: Number((seq * HOURS_PER_TICK).toFixed(2)),
+    laneKm: Number(laneKm(pos).toFixed(2)),
     at: new Date().toISOString(),
   };
 }
 
-/** Ticks that would be produced by jumping straight to the quay (fast-forward). */
-export function berthTicksFrom(nextSeq: number): number[] {
-  const firstBerth = SCRIPT.findIndex((s) => s.f >= 1);
-  const start = Math.max(nextSeq, firstBerth);
-  const out: number[] = [];
-  for (let i = start; i < SCRIPT.length; i++) out.push(i);
-  return out;
+/** Evidence for the agent from the readings received so far: the longest AIS gap and the farthest point off the lane. */
+export function voyageSignals(ticks: Tick[]): { aisGapHours: number; aisIntervalHours: number; offRouteKm: number } {
+  const seqs = [...new Set(ticks.map((t) => t.seq))].sort((a, b) => a - b);
+  let gap = seqs.length > 1 ? HOURS_PER_TICK : 0;
+  for (let i = 1; i < seqs.length; i++) gap = Math.max(gap, (seqs[i]! - seqs[i - 1]!) * HOURS_PER_TICK);
+  return { aisGapHours: gap, aisIntervalHours: HOURS_PER_TICK, offRouteKm: Math.max(0, ...ticks.map((t) => t.laneKm ?? 0)) };
 }
 
 export const isUnderway = (t: Tick | undefined): boolean => !!t && t.sog >= 3 && !t.inGeofence;
