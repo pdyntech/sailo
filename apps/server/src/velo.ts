@@ -122,19 +122,24 @@ function manualVerify(payload: string, header: string, secret: string, tolerance
 export async function verifyWebhook(payload: string, signature: string | null, opts: { simulated?: boolean } = {}): Promise<VerifiedEvent> {
   if (!signature) throw new WebhookRejected("missing x-velo-signature");
   const secret = opts.simulated ? simulatedSecret : webhookSecret();
+  // Authenticity first (same HMAC scheme as the SDK), so a shape problem below can't hide a forged request.
+  const signed = manualVerify(payload, signature, secret, 300) as Record<string, unknown>;
   const mod = await loadVelo();
-  let event: unknown;
-  let verifiedBy: VerifiedEvent["verifiedBy"] = "velo-sdk";
+  let event: unknown = signed;
+  let verifiedBy: VerifiedEvent["verifiedBy"] = "hmac-fallback";
   if (mod) {
     try {
       const V = mod.Velo as unknown as { webhooks: { verify: (o: unknown) => Promise<unknown> | unknown } };
       event = await V.webhooks.verify({ payload, signature, secret, toleranceSeconds: 300 });
+      verifiedBy = "velo-sdk";
     } catch (e) {
+      // The dashboard's "Send test event" is signed but flatter than the SDK's event shape: acknowledge it, move nothing.
+      if (signed?.test === true) {
+        console.warn("velo webhook: signed test event acknowledged without a payment intent:", e instanceof Error ? e.message : e);
+        return { id: String(signed.id ?? ""), type: String(signed.type ?? ""), paymentIntent: null, raw: signed, verifiedBy };
+      }
       throw new WebhookRejected(e instanceof Error ? `${e.name}: ${e.message}` : "signature verification failed");
     }
-  } else {
-    verifiedBy = "hmac-fallback";
-    event = manualVerify(payload, signature, secret, 300);
   }
   const ev = (event ?? {}) as Record<string, unknown>;
   const pi = (ev.paymentIntent ?? (ev.data as Record<string, unknown> | undefined)?.paymentIntent ?? null) as VerifiedEvent["paymentIntent"];
