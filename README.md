@@ -91,7 +91,7 @@ Testnet demo amounts at a fixed rate of **1 XLM = ₱1,000**. The investor deplo
 The settlement agent decides **when**, **whom** and **how much**. Code checks everything it proposes before any money moves.
 
 1. **The rules say what is permitted.** [`propose`](apps/server/src/agent.ts#L69) checks the gates (escrow funded, AIS shows the vessel under way, a verified payment for the exact amount, a berthing attestation) and the hard limits (AIS dark over 12 h, more than 50 km off the sea lane). Payouts are by **role** (`SHIPOWNER`, `LP`, `TREASURY`), never by wallet address, and amounts always come from code.
-2. **Claude decides whether to pay.** When a payout is permitted, [`decide`](apps/server/src/agent.ts#L188) asks Claude ([`askModel`](apps/server/src/agent.ts#L167), Claude Opus 5.5 with a strict JSON schema) to **PROCEED** or **HOLD** for ops review, weighing the evidence the rules don't judge: an AIS gap below the hard limit, the vessel reappearing off the lane, an ops review note. It can always decline a payout; it can never approve one the rules don't permit, or change an amount or payee. Without `LLM_API_KEY`, or if the model is unavailable, the rules decide and the decision record says so.
+2. **An LLM decides whether to pay.** When a payout is permitted, [`decide`](apps/server/src/agent.ts#L252) asks the configured model, Gemini ([`askGemini`](apps/server/src/agent.ts#L219)) or Claude ([`askModel`](apps/server/src/agent.ts#L201)), with a strict JSON schema, to **PROCEED** or **HOLD** for ops review, weighing the evidence the rules don't judge: an AIS gap below the hard limit, the vessel reappearing off the lane, an ops review note. It can always decline a payout; it can never approve one the rules don't permit, or change an amount or payee. Without `LLM_API_KEY`, or if the model is unavailable, the rules decide and the decision record says so.
    - *Try it:* **▶ Run Demo: AIS goes dark** on `/app`. AIS drops out for about 8 h and the ship reappears about 14 km off the lane, under both hard limits, so rules alone would pay. The agent holds the settlement with its reasons; an operator's [**release**](apps/server/src/demo.ts#L839) makes it decide again with the review note.
 3. **A deterministic executor checks it.** [`validateDecision`](packages/agent/src/executor.ts#L43) checks the shape, then [`execute`](packages/agent/src/executor.ts#L200) checks the preconditions for the current state, recomputes every payout in integer math, maps roles to stored wallets and calls Noir.
 4. **Noir enforces the limits.** Each payment is pre-checked with `checkPayment`. Anything over the cap, expired or underfunded is refused before a fee is paid.
@@ -200,7 +200,7 @@ graph TD
 | **Server** | Node 24 + TypeScript (`tsx`) | API, webhook receiver, agent runtime, AIS simulator, SSE stream |
 | **Frontend** | HTML / CSS / vanilla JavaScript | Landing page, role portal, voyage chart, decision stream, ops panel |
 | **Accounts** | scrypt passwords, HttpOnly session cookies, Nodemailer (SMTP) | Sign-up, email verification, password reset, rate limits |
-| **Agent** | [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) 1.3.0, Claude Opus 5.5 (optional) | Decides PROCEED or HOLD on each permitted payout; amounts always come from code |
+| **Agent** | Gemini API (REST) or [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) 1.3.0 for Claude (optional) | Decides PROCEED or HOLD on each permitted payout; amounts always come from code |
 | **Tests** | Vitest | Math, decision validator, executor gates, guardrail, recovery |
 
 ---
@@ -393,7 +393,7 @@ npm run check-mail -- you@example.com   # checks SMTP_URL / MAIL_FROM in .env.lo
 | `VELO_WEBHOOK_SECRET` | Verifies Velo webhooks | Velo dashboard |
 | `VELO_CHECKOUT_ASSET` | Checkout asset, default `native` | Optional |
 | `APP_URL` | Public site URL for checkout success and cancel links | Hosting provider |
-| `LLM_API_KEY`, `LLM_MODEL` | Anthropic API key for the agent's PROCEED/HOLD judgment (`ANTHROPIC_API_KEY` also works). `LLM_MODEL` defaults to `claude-opus-5-5`. Without a key the rules decide | [platform.claude.com](https://platform.claude.com) → API keys |
+| `LLM_API_KEY`, `LLM_MODEL`, `LLM_PROVIDER` | Gemini or Claude API key for the agent's PROCEED/HOLD judgment. A Google key (`AIza…`) uses Gemini, any other key Claude; `LLM_PROVIDER=gemini\|anthropic` forces one. `LLM_MODEL` defaults to `gemini-flash-latest` or `claude-opus-5-5`. Without a key the rules decide | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) or [platform.claude.com](https://platform.claude.com) → API keys |
 | `DATA_DIR` | Folder for accounts, sessions and portal invoices (`sailo.json`) | A persistent disk on the host |
 | `SMTP_URL`, `MAIL_FROM` | Outgoing email for verification and password reset. Without them a deployed site skips email verification and can't send password-reset links. Test them first with `npm run check-mail` | Any SMTP provider (e.g. Resend, Gmail app password) |
 | `NODE_ENV` | `production` hides development email links in the UI | Hosting provider |
@@ -452,7 +452,7 @@ Built on [Noir](https://github.com/noirx402/noir) agent contracts, [Velo](https:
 | [Nodemailer](https://nodemailer.com/) | Verification and password-reset email |
 | [`@vercel/functions`](https://vercel.com/docs/functions) | Vercel deployment of the API |
 | [tsx](https://github.com/privatenumber/tsx), [esbuild](https://esbuild.github.io/), [TypeScript](https://www.typescriptlang.org/), [Vitest](https://vitest.dev/) | Running, bundling, typing and testing |
-| [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) 1.3.0 (optional) | Claude's PROCEED/HOLD decision on each permitted payout |
+| [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) 1.3.0 (optional) | Claude's PROCEED/HOLD decision on each permitted payout, when a Claude key is set (Gemini is called over REST, no package) |
 | [Mermaid](https://mermaid.js.org/) | Diagrams in this README |
 
 **Ideas and references:** the Velo × Noir Builder Handbook, the Noir [SDK examples](https://github.com/noirx402/noir) (`check-and-pay.ts`, webhook relay) and the Velo [Express / Next.js examples](https://github.com/Velo-Ecosystem-Collection/Velo). Invoice factoring and AIS-based proof of delivery are standard trade-finance ideas, applied here to inter-island shipping.
