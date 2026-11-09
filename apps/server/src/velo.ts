@@ -61,7 +61,9 @@ export async function createCheckout(o: { invoiceId: string; amountXlm: string; 
       successUrl: `${appUrl}/?paid=${o.invoiceId}`,
       cancelUrl: `${appUrl}/?cancelled=${o.invoiceId}`,
     },
-    { idempotencyKey: `vismin-checkout:${o.invoiceId}` },
+    // One key per request (the SDK reuses it for its own retries). Not per invoice id: demo and portal ids overlap,
+    // and a key tied to the id would hand back the same (possibly expired) session when a checkout is renewed.
+    { idempotencyKey: `sailo-checkout:${o.invoiceId}:${randomBytes(8).toString("hex")}` },
   )) as Record<string, unknown>;
   const str = (k: string) => (typeof pi[k] === "string" ? (pi[k] as string) : null);
   const id = str("id") ?? str("paymentIntentId");
@@ -74,7 +76,13 @@ export interface PaymentStatus {
   status: string;
   amount: string;
   asset: string;
+  /** When the checkout stops accepting payment. Velo keeps the status at "created" after it passes. */
+  expiresAt: string | null;
 }
+
+/** A checkout that can no longer be paid: closed by Velo, or past its expiry without a payment under way. */
+export const checkoutClosed = (s: PaymentStatus, now = Date.now()): boolean =>
+  ["expired", "cancelled", "failed"].includes(s.status) || (["created", "awaiting_route"].includes(s.status) && !!s.expiresAt && Date.parse(s.expiresAt) < now);
 
 /**
  * Payment status straight from Velo (`velo.paymentIntents.retrieve`), the source of truth for whether a
@@ -87,7 +95,7 @@ export async function retrievePaymentStatus(paymentIntentId: string): Promise<Pa
   if (!mod) throw new Error("@carts1024/velo-sdk is not installed (run npm install)");
   const velo = new mod.Velo({ apiKey, environment: "testnet" });
   const pi = await velo.paymentIntents.retrieve(paymentIntentId);
-  return { id: pi.id ?? pi.paymentIntentId, status: pi.status, amount: pi.amount, asset: pi.asset };
+  return { id: pi.id ?? pi.paymentIntentId, status: pi.status, amount: pi.amount, asset: pi.asset, expiresAt: pi.expiresAt ?? null };
 }
 
 export interface VerifiedEvent {
@@ -95,7 +103,8 @@ export interface VerifiedEvent {
   type: string;
   paymentIntent: { id: string; amount: string; asset?: string; description?: string; txHash?: string } | null;
   raw: unknown;
-  verifiedBy: "velo-sdk" | "hmac-fallback";
+  /** velo-status: no webhook was applied, so the payment intent's status was read from Velo directly. */
+  verifiedBy: "velo-sdk" | "hmac-fallback" | "velo-status";
 }
 
 export class WebhookRejected extends Error {

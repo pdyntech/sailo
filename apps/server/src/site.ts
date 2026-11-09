@@ -36,9 +36,10 @@ import * as auth from "./accounts.js";
 import { withDb } from "./db.js";
 import { HttpError, readJson, send } from "./http.js";
 import { LockTimeout } from "./kv.js";
-import { createInvoice, fundInvoice, portalFor, preparePay, recordCheckout, retryInvoice, seedSamples } from "./portal.js";
+import { createInvoice, fundInvoice, portalFor, preparePay, recordCheckout, recordPolledPayment, retryInvoice, seedSamples } from "./portal.js";
 import { dueJobs, startJobs } from "./portal-chain.js";
-import { createCheckout, signSimulatedDelivery, verifyWebhook, type VerifiedEvent } from "./velo.js";
+import { env } from "./env.js";
+import { checkoutClosed, createCheckout, retrievePaymentStatus, signSimulatedDelivery, verifyWebhook, type VerifiedEvent } from "./velo.js";
 
 type Handler = (req: IncomingMessage, res: ServerResponse, match: RegExpExecArray) => Promise<void> | void;
 
@@ -136,6 +137,26 @@ const ROUTES: [method: string, path: RegExp, handler: Handler][] = [
       startJobs(await withDb(() => dueJobs()));
       return;
     }
+    let replaces: string | undefined;
+    if (plan.kind === "existing") {
+      // Ask Velo before reusing the checkout: it may be paid (webhook lost) or expired (Velo checkouts last ~30 min).
+      const st = await retrievePaymentStatus(plan.checkoutId).catch((e) => {
+        console.warn("velo status check failed:", e instanceof Error ? e.message : e);
+        return null;
+      });
+      if (st?.status === "paid" && st.asset === (env("VELO_CHECKOUT_ASSET") ?? "native")) {
+        const ev: VerifiedEvent = { id: `status_${plan.checkoutId}`, type: "payment.succeeded", paymentIntent: { id: plan.checkoutId, amount: st.amount, asset: st.asset }, raw: st, verifiedBy: "velo-status" };
+        const r = await withDb(() => ({ invoice: recordPolledPayment(auth.requireUser(req), m[1], plan.checkoutId, ev), due: dueJobs() }));
+        ok(res, { invoice: r.invoice, checkoutUrl: null });
+        startJobs(r.due);
+        return;
+      }
+      if (!st || !checkoutClosed(st)) {
+        ok(res, { invoice: plan.view, checkoutUrl: plan.view.checkoutUrl });
+        return;
+      }
+      replaces = plan.checkoutId; // closed without payment: open a fresh checkout below
+    }
     // Outside the lock: create the Velo checkout (a network call). Without VELO_API_KEY it is simulated,
     // and the payment.succeeded event is signed and verified exactly like a real Velo delivery.
     const session = await createCheckout({ invoiceId: plan.invoiceId, amountXlm: plan.amountXlm, description: plan.description });
@@ -146,7 +167,7 @@ const ROUTES: [method: string, path: RegExp, handler: Handler][] = [
     }
     const r = await withDb(() => {
       const u = auth.requireUser(req);
-      return { invoice: recordCheckout(u, m[1], session, ev), due: dueJobs() };
+      return { invoice: recordCheckout(u, m[1], session, ev, replaces), due: dueJobs() };
     });
     ok(res, { invoice: r.invoice, checkoutUrl: session.simulated ? null : session.checkoutUrl });
     startJobs(r.due);

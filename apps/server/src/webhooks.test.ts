@@ -60,6 +60,14 @@ describe("Velo webhook: payment status is confirmed with Velo before money moves
     expect(demo.applyPayment).toHaveBeenCalledOnce();
   });
 
+  it("applies a replayed delivery only once", async () => {
+    velo.verifyWebhook.mockResolvedValue(event());
+    velo.retrievePaymentStatus.mockResolvedValue({ id: "pi_1", status: "paid", amount: "1000", asset: "native" });
+    expect((await deliver()).status).toBe(200);
+    expect(await deliver()).toEqual({ status: 200, body: { ok: true, duplicate: true } });
+    expect(demo.applyPayment).toHaveBeenCalledOnce();
+  });
+
   it("uses Velo's amount, not the webhook body's", async () => {
     velo.verifyWebhook.mockResolvedValue(event("1000"));
     velo.retrievePaymentStatus.mockResolvedValue({ id: "pi_1", status: "paid", amount: "10", asset: "native" });
