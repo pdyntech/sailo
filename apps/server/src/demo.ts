@@ -1044,7 +1044,10 @@ export async function viewState(): Promise<DemoState> {
     viewCache.snap = (await viewCache.p) ?? viewCache.snap;
   } else if (viewCache.p) viewCache.snap = (await viewCache.p) ?? viewCache.snap;
   if (leaseHeld) return state;
-  return viewCache.snap ?? state;
+  const snap = viewCache.snap;
+  if (!snap) return state;
+  // A saved run keeps the flags of the server that saved it; show what this deployment has configured.
+  return { ...snap, config: { ...snap.config, veloCheckout: veloCheckoutConfigured(), realWebhookSecret: usingRealWebhookSecret(), llm: llmConfigured() } };
 }
 
 export async function init(): Promise<void> {
