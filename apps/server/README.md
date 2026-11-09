@@ -50,7 +50,7 @@ With a Redis store configured (`KV_REST_API_URL` + `KV_REST_API_TOKEN`, `UPSTASH
 | `VELO_WEBHOOK_SECRET` | recommended | Verifies real Velo webhooks. Without it, only self-signed simulated deliveries verify |
 | `VELO_CHECKOUT_ASSET` | no | Default `native` (handbook example) |
 | `APP_URL` | on deploy | Public URL, used for checkout success and cancel links |
-| `LLM_API_KEY`, `LLM_MODEL`, `LLM_PROVIDER` | no | Gemini or Claude decides PROCEED or HOLD on each payout the rules permit. A Google key (`AIza…`) uses Gemini (default `gemini-flash-latest`), any other key Claude (default `claude-opus-5-5`); `LLM_PROVIDER` forces one. Without a key the rules decide. Amounts always come from code |
+| `LLM_API_KEY`, `LLM_MODEL`, `LLM_PROVIDER` | no | Gemini or Claude decides PROCEED or HOLD on each payout the rules permit. A Claude key (`sk-ant-…`) uses Claude (default `claude-opus-5-5`), any other key Gemini (default `gemini-3.5-flash`); `LLM_PROVIDER` forces one. Without a key the rules decide. Amounts always come from code |
 | `DEMO_TICK_MS` | no | AIS tick interval, default 1800 |
 | `SIMULATE_CHAIN` | no | `1` runs the Noir contracts in memory (labelled "simulated", no Testnet). Also used automatically when wallet keys are missing; the dashboard can switch modes at runtime |
 

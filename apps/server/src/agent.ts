@@ -101,8 +101,8 @@ export function propose(f: Facts): { decision: AgentDecision; reviewable: boolea
 }
 
 // ---------- the model ----------
-// Claude (Anthropic SDK) or Gemini (Google's REST API). LLM_PROVIDER picks one; otherwise a Google key (AIza…) or
-// GEMINI_API_KEY means Gemini and any other key means Claude.
+// Claude (Anthropic SDK) or Gemini (Google's REST API). LLM_PROVIDER picks one; otherwise a Claude key (sk-ant-…) or
+// ANTHROPIC_API_KEY means Claude and any other key (Google's AIza… or AQ.…) means Gemini.
 type Provider = "anthropic" | "gemini";
 const apiKey = () => env("LLM_API_KEY") ?? env("ANTHROPIC_API_KEY") ?? env("GEMINI_API_KEY");
 export function llmProvider(): Provider | null {
@@ -111,9 +111,10 @@ export function llmProvider(): Provider | null {
   const p = env("LLM_PROVIDER")?.toLowerCase();
   if (p === "gemini" || p === "google") return "gemini";
   if (p === "anthropic" || p === "claude") return "anthropic";
-  return key.startsWith("AIza") || (!env("LLM_API_KEY") && !env("ANTHROPIC_API_KEY")) ? "gemini" : "anthropic";
+  const k = env("LLM_API_KEY");
+  return (k ? k.startsWith("sk-ant-") : !!env("ANTHROPIC_API_KEY")) ? "anthropic" : "gemini";
 }
-const MODEL = () => env("LLM_MODEL") ?? (llmProvider() === "gemini" ? "gemini-flash-latest" : "claude-opus-5-5");
+const MODEL = () => env("LLM_MODEL") ?? (llmProvider() === "gemini" ? "gemini-3.5-flash" : "claude-opus-5-5");
 /** Server-side refusal fallbacks are available for these models only. */
 const FALLBACK_MODELS = new Set(["claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"]);
 
@@ -133,7 +134,7 @@ const SYSTEM = `You are the settlement agent for Sailo, which advances freight i
 
 Code has already checked the hard rules and found that the payout in the request is permitted: the escrow is funded, the amounts are computed and within the on-chain cap, and for a settlement the cargo owner's payment is verified for the exact amount and arrival at the port is attested. Your job is the judgment those rules can't make: PROCEED with the payout now, or HOLD it for a human ops review.
 
-Hold when the voyage or payment evidence is inconsistent in a way that matters for the investor's money. AIS going dark for hours mid-voyage, or the vessel reappearing away from the expected sea lane, can mean a transshipment, a cargo swap or spoofed positions; that is what an arrival attestation can't rule out on its own. Readings arrive at a normal interval; a gap of a few intervals out at sea, with the track consistent before and after, is ordinary. Proceed when the evidence is consistent. If an ops review cleared an earlier hold, weigh their note: it means a person checked the concern.
+Hold when the voyage or payment evidence is inconsistent in a way that matters for the investor's money. AIS going dark for hours mid-voyage, or the vessel reappearing away from the expected sea lane, can mean a transshipment, a cargo swap or spoofed positions; that is what an arrival attestation can't rule out on its own. Readings arrive at a normal interval. One missed reading, or a track within a couple of km of the lane, is ordinary. A blackout of several intervals together with the vessel turning up well off the lane is the signature of a ship-to-ship transfer or spoofing, even though each figure is below its hard limit: the hard limits are where code holds automatically, not a line below which the evidence is fine. Proceed when the evidence is consistent. If an ops review cleared an earlier hold, weigh their note: it means a person checked the concern.
 
 You can't change amounts or payees, and holding moves no money. Write "reason" in one or two plain sentences for the ops dashboard, under 240 characters, naming the facts you relied on. List concrete concerns in "risks" (empty if there are none).`;
 

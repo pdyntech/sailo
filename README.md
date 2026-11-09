@@ -393,7 +393,7 @@ npm run check-mail -- you@example.com   # checks SMTP_URL / MAIL_FROM in .env.lo
 | `VELO_WEBHOOK_SECRET` | Verifies Velo webhooks | Velo dashboard |
 | `VELO_CHECKOUT_ASSET` | Checkout asset, default `native` | Optional |
 | `APP_URL` | Public site URL for checkout success and cancel links | Hosting provider |
-| `LLM_API_KEY`, `LLM_MODEL`, `LLM_PROVIDER` | Gemini or Claude API key for the agent's PROCEED/HOLD judgment. A Google key (`AIza…`) uses Gemini, any other key Claude; `LLM_PROVIDER=gemini\|anthropic` forces one. `LLM_MODEL` defaults to `gemini-flash-latest` or `claude-opus-5-5`. Without a key the rules decide | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) or [platform.claude.com](https://platform.claude.com) → API keys |
+| `LLM_API_KEY`, `LLM_MODEL`, `LLM_PROVIDER` | Gemini or Claude API key for the agent's PROCEED/HOLD judgment. A Claude key (`sk-ant-…`) uses Claude, any other key (Google's `AIza…` or `AQ.…`) Gemini; `LLM_PROVIDER=gemini\|anthropic` forces one. `LLM_MODEL` defaults to `gemini-3.5-flash` or `claude-opus-5-5`. Without a key the rules decide | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) or [platform.claude.com](https://platform.claude.com) → API keys |
 | `DATA_DIR` | Folder for accounts, sessions and portal invoices (`sailo.json`) | A persistent disk on the host |
 | `SMTP_URL`, `MAIL_FROM` | Outgoing email for verification and password reset. Without them a deployed site skips email verification and can't send password-reset links. Test them first with `npm run check-mail` | Any SMTP provider (e.g. Resend, Gmail app password) |
 | `NODE_ENV` | `production` hides development email links in the UI | Hosting provider |
