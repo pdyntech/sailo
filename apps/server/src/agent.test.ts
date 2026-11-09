@@ -45,7 +45,7 @@ describe("the agent: the model decides within what the rules permit", () => {
   });
 
   it("PROCEED keeps the code's payouts and uses the model's reason", async () => {
-    process.env.LLM_API_KEY = "test";
+    process.env.LLM_API_KEY = "sk-ant-test";
     const p = (await decide(paid, verdict({ decision: "PROCEED", reason: "Track consistent.", risks: [] })))!;
     expect(p.engine).toBe("claude-opus-5-5");
     expect(p.decision.decision).toBe("SETTLE");
@@ -54,20 +54,20 @@ describe("the agent: the model decides within what the rules permit", () => {
   });
 
   it("HOLD moves nothing and is reviewable", async () => {
-    process.env.LLM_API_KEY = "test";
+    process.env.LLM_API_KEY = "sk-ant-test";
     const p = (await decide(paid, verdict({ decision: "HOLD", reason: "AIS dark 7.7 h, reappeared 14 km off the lane.", risks: ["possible transshipment"] })))!;
     expect(p).toMatchObject({ reviewable: true, risks: ["possible transshipment"], decision: { decision: "HOLD", payouts: [] } });
   });
 
   it("never asks the model when the rules hold: it can only decline a payout, never approve one", async () => {
-    process.env.LLM_API_KEY = "test";
+    process.env.LLM_API_KEY = "sk-ant-test";
     const ask = verdict({ decision: "PROCEED", reason: "pay", risks: [] });
     expect((await decide({ ...paid, paymentVerified: false }, ask))!.decision.decision).toBe("HOLD");
     expect(ask).not.toHaveBeenCalled();
   });
 
   it("falls back to the rules when the model is unavailable", async () => {
-    process.env.LLM_API_KEY = "test";
+    process.env.LLM_API_KEY = "sk-ant-test";
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const p = (await decide(funded, vi.fn(async () => { throw new Error("timeout"); })))!;
     expect(p.engine).toBe("rules (model unavailable: timeout)");
@@ -122,6 +122,8 @@ describe("Gemini", () => {
     expect(llmProvider()).toBeNull();
     process.env.LLM_API_KEY = "AIzaTest";
     expect(llmProvider()).toBe("gemini");
+    process.env.LLM_API_KEY = "AQ.newGoogleKey";
+    expect(llmProvider()).toBe("gemini");
     process.env.LLM_API_KEY = "sk-ant-test";
     expect(llmProvider()).toBe("anthropic");
     process.env.LLM_PROVIDER = "gemini";
@@ -130,6 +132,9 @@ describe("Gemini", () => {
     delete process.env.LLM_PROVIDER;
     process.env.GEMINI_API_KEY = "x";
     expect(llmProvider()).toBe("gemini");
+    delete process.env.GEMINI_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "x";
+    expect(llmProvider()).toBe("anthropic");
   });
 
   it("asks for a schema-checked verdict and returns it", async () => {
@@ -137,7 +142,7 @@ describe("Gemini", () => {
     const fetchFn = vi.fn(async () => reply(said({ decision: "HOLD", reason: " Gap. ", risks: ["spoofing"] })));
     expect(await askGemini("AIzaTest", paid, permitted, fetchFn as unknown as typeof fetch)).toEqual({ decision: "HOLD", reason: "Gap.", risks: ["spoofing"] });
     const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent");
+    expect(url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent");
     expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("AIzaTest");
     const req = JSON.parse(init.body as string);
     expect(req.generationConfig.responseMimeType).toBe("application/json");
@@ -164,6 +169,6 @@ describe("Gemini", () => {
   it("decide() names the Gemini model as the engine", async () => {
     process.env.LLM_API_KEY = "AIzaTest";
     const p = (await decide(paid, vi.fn(async () => ({ decision: "PROCEED" as const, reason: "ok", risks: [] }))))!;
-    expect(p.engine).toBe("gemini-flash-latest");
+    expect(p.engine).toBe("gemini-3.5-flash");
   });
 });
