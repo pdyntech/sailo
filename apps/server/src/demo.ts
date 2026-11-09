@@ -685,6 +685,16 @@ function progressPayment(): Promise<void> {
   return paymentInFlight;
 }
 
+/** Paid but not settled when its server stopped: the agent decides again. Counted as work so this server keeps the run (and isn't frozen) until it's done. */
+function resumeSettlement(): Promise<void> {
+  if (paymentInFlight) return paymentInFlight;
+  paymentInFlight = serial(() => agentStep()).finally(() => {
+    paymentInFlight = null;
+    scheduleRelease();
+  });
+  return paymentInFlight;
+}
+
 export function simulateWebhook() {
   return action("Simulate Velo webhook", async () => {
     if (state.status === "DRAFT") throw new StepError("Tokenize the invoice first.");
@@ -996,7 +1006,7 @@ function adopt(snap: DemoState): void {
   } else if (state.status === "BERTHED" && state.payment?.verified) {
     void progressPayment().catch((e) => log("error", `settlement: ${e instanceof Error ? e.message : e}`));
   } else if (state.status === "PAID") {
-    void serial(() => agentStep()).catch((e) => log("error", `settlement: ${e instanceof Error ? e.message : e}`));
+    void resumeSettlement().catch((e) => log("error", `settlement: ${e instanceof Error ? e.message : e}`));
   }
   emit();
 }
