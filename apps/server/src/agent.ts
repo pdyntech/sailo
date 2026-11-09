@@ -5,7 +5,7 @@
  *   1. Rules (code) decide what is permitted: the gates (escrow, AIS under way, verified payment for the exact
  *      amount, berthing attestation) and the hard limits (AIS dark > 12 h, > 50 km off the sea lane). Amounts
  *      always come from computePayouts.
- *   2. When a payout is permitted and a model is configured (LLM_API_KEY or ANTHROPIC_API_KEY), Claude decides
+ *   2. When a payout is permitted and a model is configured (LLM_API_KEY: a Claude or Gemini key), the model decides
  *      whether to PROCEED with it now or HOLD it for ops review, weighing evidence the rules don't judge (an AIS
  *      gap below the hard limit, the vessel reappearing off the lane, an ops review note). It can always decline
  *      to pay; it can never pay what the rules don't permit, and it never sets amounts or payees.
@@ -101,18 +101,27 @@ export function propose(f: Facts): { decision: AgentDecision; reviewable: boolea
 }
 
 // ---------- the model ----------
-const MODEL = () => env("LLM_MODEL") ?? "claude-opus-5-5";
-const apiKey = () => env("LLM_API_KEY") ?? env("ANTHROPIC_API_KEY");
+// Claude (Anthropic SDK) or Gemini (Google's REST API). LLM_PROVIDER picks one; otherwise a Google key (AIza…) or
+// GEMINI_API_KEY means Gemini and any other key means Claude.
+type Provider = "anthropic" | "gemini";
+const apiKey = () => env("LLM_API_KEY") ?? env("ANTHROPIC_API_KEY") ?? env("GEMINI_API_KEY");
+export function llmProvider(): Provider | null {
+  const key = apiKey();
+  if (!key) return null;
+  const p = env("LLM_PROVIDER")?.toLowerCase();
+  if (p === "gemini" || p === "google") return "gemini";
+  if (p === "anthropic" || p === "claude") return "anthropic";
+  return key.startsWith("AIza") || (!env("LLM_API_KEY") && !env("ANTHROPIC_API_KEY")) ? "gemini" : "anthropic";
+}
+const MODEL = () => env("LLM_MODEL") ?? (llmProvider() === "gemini" ? "gemini-flash-latest" : "claude-opus-5-5");
 /** Server-side refusal fallbacks are available for these models only. */
 const FALLBACK_MODELS = new Set(["claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"]);
 
-export const llmConfigured = (): boolean => !!apiKey();
+export const llmConfigured = (): boolean => !!llmProvider();
 
 let client: Anthropic | null = null;
 let clientKey: string | undefined;
-function getClient(): Anthropic | null {
-  const key = apiKey();
-  if (!key) return null;
+function getClient(key: string): Anthropic {
   if (!client || clientKey !== key) {
     client = new Anthropic({ apiKey: key, timeout: 30_000, maxRetries: 1 });
     clientKey = key;
@@ -163,6 +172,31 @@ function evidence(f: Facts, permitted: AgentDecision): Record<string, unknown> {
   };
 }
 
+/** Same schema in the OpenAPI subset Gemini's responseSchema takes. */
+const GEMINI_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    decision: { type: "STRING", enum: ["PROCEED", "HOLD"] },
+    reason: { type: "STRING" },
+    risks: { type: "ARRAY", items: { type: "STRING" } },
+  },
+  required: ["decision", "reason", "risks"],
+  propertyOrdering: ["decision", "reason", "risks"],
+};
+
+function parseVerdict(text: string): ModelVerdict {
+  let v: Partial<ModelVerdict>;
+  try {
+    v = JSON.parse(text) as Partial<ModelVerdict>;
+  } catch {
+    throw new Error("the answer did not match the schema");
+  }
+  if ((v.decision !== "PROCEED" && v.decision !== "HOLD") || typeof v.reason !== "string" || !v.reason.trim() || !Array.isArray(v.risks)) {
+    throw new Error("the answer did not match the schema");
+  }
+  return { decision: v.decision, reason: v.reason.trim().slice(0, 280), risks: v.risks.filter((r): r is string => typeof r === "string").slice(0, 8) };
+}
+
 /** Asks Claude to PROCEED or HOLD. Throws if the model is unavailable or its answer is unusable. */
 export async function askModel(c: Anthropic, f: Facts, permitted: AgentDecision): Promise<ModelVerdict> {
   const model = MODEL();
@@ -176,25 +210,54 @@ export async function askModel(c: Anthropic, f: Facts, permitted: AgentDecision)
   });
   if (res.stop_reason === "refusal") throw new Error("the model declined");
   if (res.stop_reason === "max_tokens") throw new Error("the answer was cut off");
-  const text = res.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
-  const v = JSON.parse(text) as Partial<ModelVerdict>;
-  if ((v.decision !== "PROCEED" && v.decision !== "HOLD") || typeof v.reason !== "string" || !v.reason.trim() || !Array.isArray(v.risks)) {
-    throw new Error("the answer did not match the schema");
-  }
-  return { decision: v.decision, reason: v.reason.trim().slice(0, 280), risks: v.risks.filter((r): r is string => typeof r === "string").slice(0, 8) };
+  return parseVerdict(res.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join(""));
 }
 
+const GEMINI_BASE = () => env("GEMINI_BASE_URL") ?? "https://generativelanguage.googleapis.com/v1beta";
+
+/** Asks Gemini to PROCEED or HOLD. Throws if the model is unavailable or its answer is unusable. */
+export async function askGemini(key: string, f: Facts, permitted: AgentDecision, fetchFn: typeof fetch = fetch): Promise<ModelVerdict> {
+  const url = `${GEMINI_BASE()}/models/${encodeURIComponent(MODEL())}:generateContent`;
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: SYSTEM }] },
+    contents: [{ role: "user", parts: [{ text: JSON.stringify(evidence(f, permitted)) }] }],
+    generationConfig: { responseMimeType: "application/json", responseSchema: GEMINI_SCHEMA, maxOutputTokens: 4000 },
+  });
+  let res: Response | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    res = await fetchFn(url, { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": key }, body, signal: AbortSignal.timeout(30_000) });
+    if (res.status !== 429 && res.status < 500) break;
+  }
+  if (!res!.ok) throw new Error(`API ${res!.status}`);
+  const data = (await res!.json()) as {
+    promptFeedback?: { blockReason?: string };
+    candidates?: { finishReason?: string; content?: { parts?: { text?: string; thought?: boolean }[] } }[];
+  };
+  if (data.promptFeedback?.blockReason) throw new Error("the model declined");
+  const cand = data.candidates?.[0];
+  if (!cand) throw new Error("the model declined");
+  if (cand.finishReason === "MAX_TOKENS") throw new Error("the answer was cut off");
+  if (cand.finishReason && cand.finishReason !== "STOP") throw new Error("the model declined");
+  return parseVerdict((cand.content?.parts ?? []).flatMap((p) => (p.thought || !p.text ? [] : [p.text])).join(""));
+}
+
+/** The configured model's verdict on a permitted payout. */
+export type Ask = (f: Facts, permitted: AgentDecision) => Promise<ModelVerdict>;
+const askConfigured: Ask = (f, permitted) => {
+  const key = apiKey()!;
+  return llmProvider() === "gemini" ? askGemini(key, f, permitted) : askModel(getClient(key), f, permitted);
+};
+
 /** The agent's decision: the rules say what is permitted, the model (when configured) decides whether to go ahead. */
-export async function decide(f: Facts, ask: typeof askModel = askModel): Promise<Proposal | null> {
+export async function decide(f: Facts, ask: Ask = askConfigured): Promise<Proposal | null> {
   const base = propose(f);
   if (!base) return null;
   const rules: Proposal = { decision: base.decision, engine: "rules", reviewable: base.reviewable, risks: [] };
   // A hold from the rules stands: the model may only ever decline a payout, never approve one.
   if (base.decision.decision === "HOLD") return rules;
-  const c = getClient();
-  if (!c) return rules;
+  if (!llmConfigured()) return rules;
   try {
-    const v = await ask(c, f, base.decision);
+    const v = await ask(f, base.decision);
     const engine = MODEL();
     if (v.decision === "PROCEED") return { decision: { ...base.decision, reason: v.reason }, engine, reviewable: false, risks: v.risks };
     return { decision: { invoiceId: f.invoiceId, decision: "HOLD", reason: v.reason, payouts: [] }, engine, reviewable: true, risks: v.risks };

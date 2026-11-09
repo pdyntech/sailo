@@ -154,7 +154,7 @@ function renderChips() {
       ? chip("warn", "Simulation mode", "Contracts run in memory with the same rules. No Testnet transactions.")
       : chip(c.chainReady ? "ok" : "bad", c.chainReady ? "Stellar Testnet · live" : "Wallets missing", c.chainReady ? "Noir contracts via @noirx402/agent-sdk" : c.missing.join(", ")),
     chip(c.veloCheckout ? "ok" : "warn", c.veloCheckout ? "Velo checkout live" : "Velo checkout simulated", "VELO_API_KEY"),
-    chip(c.llm ? "ok" : "", c.llm ? "LLM-worded reasons" : "Rules agent", c.llm ? "An LLM writes the reason text; amounts and gates stay deterministic" : "Deterministic rules agent (set LLM_API_KEY for LLM-written reasons)"),
+    chip(c.llm ? "ok" : "", c.llm ? "AI agent decides" : "Rules agent", c.llm ? "An LLM decides PROCEED or HOLD on each payout the rules permit; amounts and gates stay in code" : "Deterministic rules agent (set LLM_API_KEY so an LLM decides PROCEED or HOLD)"),
     `<span class="chip">${esc(S.invoice.id)}</span>`,
     `<span class="chip" title="Fixed demo conversion">1 XLM = ₱1,000</span>`,
   ].join("");
@@ -498,8 +498,9 @@ function renderKpis() {
 const seen = new Set();
 const fresh = new Set();
 let seenInit = false;
-// Who made the call: the model (Claude) or the rules.
-const engineLabel = (e) => (/^claude-/.test(e || "") ? `AI agent · ${e}` : e || "");
+// Who made the call: a model (Claude or Gemini) or the rules.
+const isModel = (e) => /^(claude|gemini)-/.test(e || "");
+const engineLabel = (e) => (isModel(e) ? `AI agent · ${e}` : e || "");
 const lastHold = () => [...(S.decisions || [])].reverse().find((d) => d.decision === "HOLD");
 const canRelease = () => S.status === "HOLD" && !!lastHold()?.reviewable;
 
@@ -515,7 +516,7 @@ function trace(d) {
   if (d.decision === "REFUSED") return [ok(`Tried one ${fmtXlm(S.invoice.faceXlm)} payout`), bad(`checkPayment → ${d.refusal || "over_limit"}`), bad("SDK refused at simulation · no transaction, no fee")];
   if (d.decision === "DEFAULT") return [ok("Ops-triggered default"), ok("Agent revoked"), ok("Escrow swept to treasury")];
   if (d.decision === "HOLD" && d.reviewable)
-    return /^claude-/.test(d.engine || "")
+    return isModel(d.engine)
       ? [ok("Rules: payout permitted (checks passed, under hard limits)"), bad("Agent judged the evidence needs a second look"), ok("No money moved · an ops review can release it")]
       : [bad("Hard limit reached (AIS dark or off the sea lane)"), ok("No money moved · an ops review can release it")];
   if (d.refusal) return [bad(`Stopped: ${d.refusal}`), ok("No money moved")];

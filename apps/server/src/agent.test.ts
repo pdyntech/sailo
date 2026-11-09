@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computePayouts, toStroops } from "@noirxvelo/shared";
 import type Anthropic from "@anthropic-ai/sdk";
-import { HARD_LIMITS, askModel, decide, propose, type Facts, type ModelVerdict } from "./agent.js";
+import { HARD_LIMITS, askGemini, askModel, decide, llmProvider, propose, type Facts, type ModelVerdict } from "./agent.js";
 
 const V = toStroops("1000");
 const P = computePayouts(V);
@@ -13,6 +13,8 @@ beforeEach(() => {
   delete process.env.LLM_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.LLM_MODEL;
+  delete process.env.LLM_PROVIDER;
+  delete process.env.GEMINI_API_KEY;
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -108,5 +110,60 @@ describe("the model call", () => {
     await expect(askModel(fake(answer({}, "max_tokens")).client, paid, permitted)).rejects.toThrow("cut off");
     await expect(askModel(fake(answer({ decision: "PAY", reason: "x", risks: [] })).client, paid, permitted)).rejects.toThrow("schema");
     await expect(askModel(fake(answer({ decision: "PROCEED", reason: " ", risks: [] })).client, paid, permitted)).rejects.toThrow("schema");
+  });
+});
+
+describe("Gemini", () => {
+  const permitted = propose(paid)!.decision;
+  const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const said = (o: unknown, finishReason = "STOP") => ({ candidates: [{ finishReason, content: { parts: [{ text: "thinking", thought: true }, { text: JSON.stringify(o) }] } }] });
+
+  it("picks the provider from the key, or LLM_PROVIDER", () => {
+    expect(llmProvider()).toBeNull();
+    process.env.LLM_API_KEY = "AIzaTest";
+    expect(llmProvider()).toBe("gemini");
+    process.env.LLM_API_KEY = "sk-ant-test";
+    expect(llmProvider()).toBe("anthropic");
+    process.env.LLM_PROVIDER = "gemini";
+    expect(llmProvider()).toBe("gemini");
+    delete process.env.LLM_API_KEY;
+    delete process.env.LLM_PROVIDER;
+    process.env.GEMINI_API_KEY = "x";
+    expect(llmProvider()).toBe("gemini");
+  });
+
+  it("asks for a schema-checked verdict and returns it", async () => {
+    process.env.LLM_API_KEY = "AIzaTest";
+    const fetchFn = vi.fn(async () => reply(said({ decision: "HOLD", reason: " Gap. ", risks: ["spoofing"] })));
+    expect(await askGemini("AIzaTest", paid, permitted, fetchFn as unknown as typeof fetch)).toEqual({ decision: "HOLD", reason: "Gap.", risks: ["spoofing"] });
+    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent");
+    expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("AIzaTest");
+    const req = JSON.parse(init.body as string);
+    expect(req.generationConfig.responseMimeType).toBe("application/json");
+    expect(req.generationConfig.responseSchema.properties.decision.enum).toEqual(["PROCEED", "HOLD"]);
+    expect(JSON.parse(req.contents[0].parts[0].text).permittedPayout.decision).toBe("SETTLE");
+  });
+
+  it("retries once on a server error, then reports the status", async () => {
+    const fetchFn = vi.fn(async () => reply({}, 503));
+    await expect(askGemini("k", paid, permitted, fetchFn as unknown as typeof fetch)).rejects.toThrow("API 503");
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    await expect(askGemini("k", paid, permitted, (async () => reply({}, 400)) as unknown as typeof fetch)).rejects.toThrow("API 400");
+  });
+
+  it("rejects blocked, cut-off and off-schema answers", async () => {
+    const ask = (body: unknown) => askGemini("k", paid, permitted, (async () => reply(body)) as unknown as typeof fetch);
+    await expect(ask({ promptFeedback: { blockReason: "SAFETY" } })).rejects.toThrow("declined");
+    await expect(ask(said({}, "SAFETY"))).rejects.toThrow("declined");
+    await expect(ask(said({}, "MAX_TOKENS"))).rejects.toThrow("cut off");
+    await expect(ask(said({ decision: "PAY", reason: "x", risks: [] }))).rejects.toThrow("schema");
+    await expect(ask({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: "not json" }] } }] })).rejects.toThrow("schema");
+  });
+
+  it("decide() names the Gemini model as the engine", async () => {
+    process.env.LLM_API_KEY = "AIzaTest";
+    const p = (await decide(paid, vi.fn(async () => ({ decision: "PROCEED" as const, reason: "ok", risks: [] }))))!;
+    expect(p.engine).toBe("gemini-flash-latest");
   });
 });
