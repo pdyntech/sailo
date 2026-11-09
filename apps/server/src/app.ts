@@ -41,24 +41,27 @@ const ACTIONS: Record<string, () => Promise<unknown>> = {
   "/api/reset": demo.reset,
   "/api/mode/simulation": demo.useSimulation,
   "/api/mode/testnet": demo.useTestnet,
-  "/api/run-demo": demo.runDemo,
+  "/api/run-demo": () => demo.runDemo(),
+  "/api/run-demo/ais-dark": () => demo.runDemo("ais-dark"),
+  "/api/release-hold": demo.releaseHold,
 };
 
 /**
- * Operator-only actions. Switching chain modes changes what every visitor sees (real Testnet transactions or the
- * in-memory simulation), so it needs OPS_TOKEN, sent as the x-ops-token header. Every other action is a demo step
- * that anyone may run: each checks the demo's state, and only one runs at a time.
+ * Operator-only actions, which need OPS_TOKEN (sent as the x-ops-token header). Switching chain modes changes what
+ * every visitor sees (real Testnet transactions or the in-memory simulation), and releasing a hold overrides the
+ * agent's caution, so both are an operator's call. Every other action is a demo step that anyone may run: each
+ * checks the demo's state, and only one runs at a time.
  */
-const OPS_ONLY = new Set(["/api/mode/simulation", "/api/mode/testnet"]);
+const OPS_ONLY = new Set(["/api/mode/simulation", "/api/mode/testnet", "/api/release-hold"]);
 const deployed = (): boolean => env("NODE_ENV") === "production" || !!(process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT);
 
 function opsRefusal(req: IncomingMessage): { status: number; error: string } | null {
   const token = env("OPS_TOKEN");
-  if (!token) return deployed() ? { status: 403, error: "Switching modes is turned off on this server (OPS_TOKEN is not set)." } : null;
+  if (!token) return deployed() ? { status: 403, error: "Operator actions are turned off on this server (OPS_TOKEN is not set)." } : null;
   const given = req.headers["x-ops-token"];
   const digest = (v: string) => createHash("sha256").update(v).digest();
   if (typeof given === "string" && timingSafeEqual(digest(given), digest(token))) return null;
-  return { status: 401, error: "Only the operator can switch modes." };
+  return { status: 401, error: "Only the operator can do this." };
 }
 
 async function handleAction(path: string, res: ServerResponse): Promise<void> {

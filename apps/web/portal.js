@@ -123,7 +123,9 @@ function action(i){var m=i.m,s=i.state;
   if(i.chainBusy)return ['<span class="spin" aria-hidden="true"></span>'+esc(i.chainBusy)+'…'+(i.chainError?' <span class="mute">(retrying after: '+esc(i.chainError)+')</span>':'')];
   if(s==='BERTHED'&&role==='Cargo owner'&&i.checkoutUrl)return ['Your Velo checkout is open. Settlement starts on Stellar as soon as Velo confirms the payment.','checkout','Open Velo checkout'];
   if(s==='BERTHED'&&i.paymentPending)return ['Waiting for Velo to confirm the cargo owner’s payment.']}
- if(s==='HOLD'){var last=i.log[i.log.length-1];return ['The agent held this invoice. Nothing moved. '+(last?esc(last.text):'')]}
+ if(s==='HOLD'){var last=i.log[i.log.length-1];
+  if(i.agentHold)return ['The agent held this payout for a second look. Nothing moved. '+(last?esc(last.text):''),'retry','Ask the agent again'];
+  return ['The agent held this invoice. Nothing moved. '+(last?esc(last.text):'')]}
  if(s==='TOKENIZED'){
   if(role==='Investor')return ['Open for funding. You fund '+fmt(m.adv)+' and receive '+fmt(m.lp)+' at settlement.','fund','Fund '+fmt(m.adv)];
   return [i.simInvestor?'Sample invoice: a simulated investor will fund '+fmt(m.adv)+' in a few seconds.':'Listed in the investor marketplace. Waiting for an investor to fund '+fmt(m.adv)+'.']}

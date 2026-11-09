@@ -95,6 +95,17 @@ describe("portal chain steps", () => {
     expect(chain.dueJobs()).toEqual(["INV-2026-001"]);
   });
 
+  it("lets the parties ask the agent again after a judgment hold, never after a failed check", () => {
+    const held = { ...inv("HOLD", { agentHold: true }), holdFrom: "PAID" as const };
+    expect(chain.needsRetry(held)).toBe(true);
+    chain.resetRetry(held);
+    expect(held.state).toBe("PAID");
+    expect(held.chain!.agentHold).toBe(false);
+    expect(chain.jobFor(held)).toBe("settle"); // the agent decides again
+    expect(chain.needsRetry({ ...inv("HOLD"), holdFrom: "PAID" })).toBe(false); // e.g. an escrow anomaly
+    expect(chain.needsRetry({ ...inv("HOLD", { agentHold: true }), holdFrom: "BERTHED" })).toBe(false);
+  });
+
   it("signs the berthing proof with the agent key", () => {
     const a = chain.signBerthing(inv("IN_TRANSIT"), readingsAfter(chain.VOYAGE_MS, chain.VOYAGE_MS))!;
     expect(a.signer).toBe(process.env.AGENT_PUBLIC);

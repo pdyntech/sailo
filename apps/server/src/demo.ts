@@ -28,13 +28,13 @@ import {
   type Role,
 } from "@noirxvelo/agent";
 import { SEED_WAYBILL, canonicalJson, computePayouts, fromStroops, invoiceHash, toStroops } from "@noirxvelo/shared";
-import { decide, type Facts } from "./agent.js";
+import { decide, llmConfigured, propose, type Facts, type OpsReview } from "./agent.js";
 import { createSimChain, type SimChain } from "./simchain.js";
 import { env, missingChainEnv } from "./env.js";
 import { addBusyCheck } from "./background.js";
 import { INSTANCE_ID, delIf, extendIf, getJson, getRaw, kvEnabled, setJson, setNx } from "./kv.js";
 import { chainClient, topUp } from "./wallets.js";
-import { CEBU, TOTAL_TICKS, berthTicksFrom, isBerthed, isUnderway, makeTick, type Tick } from "./telemetry.js";
+import { AIS_DARK, CEBU, TOTAL_TICKS, isBerthed, isUnderway, makeTick, voyageSignals, type Tick } from "./telemetry.js";
 import {
   createCheckout,
   signSimulatedDelivery,
@@ -81,7 +81,15 @@ export interface DecisionRow {
   finalEscrowXlm: string | null;
   attestation: Attestation | null;
   extra: unknown;
+  /** Concerns the model listed when it decided. */
+  risks?: string[];
+  /** A hold an ops review may release (the agent's judgment or a hard limit, not a failed check). */
+  reviewable?: boolean;
+  /** The decision point this row answers (run, rules decision, status, review), so it is never asked twice. */
+  key?: string;
 }
+
+export type Scenario = "normal" | "ais-dark";
 
 export interface LogRow {
   at: string;
@@ -116,6 +124,10 @@ export interface DemoState {
   log: LogRow[];
   busy: string | null;
   autopilot: boolean;
+  /** What the voyage does in this run ("ais-dark": AIS drops out mid-voyage and the vessel reappears off the lane). */
+  scenario?: Scenario;
+  /** An ops review that released a hold in this run. */
+  opsReview?: OpsReview | null;
   error: string | null;
   config: { chainReady: boolean; mode: "testnet" | "simulation"; canGoLive: boolean; missing: string[]; veloCheckout: boolean; realWebhookSecret: boolean; llm: boolean; tickMs: number };
   updatedAt: string;
@@ -158,13 +170,13 @@ const getClient = () => (simMode ? getSim().client : chainClient());
 
 // ---------- state ----------
 let runCounter = 0;
+/** Run number whose simulated ledger lives in this instance (a simulated run can't move between instances). */
+let simLedgerRun = 0; // declared before the first freshState(), which sets it in simulation mode
 let state: DemoState = freshState();
 const listeners = new Set<(s: DemoState) => void>();
 let voyageToken = 0;
 let fastForward = false;
 const decided = new Set<string>();
-/** Run number whose simulated ledger lives in this instance (a simulated run can't move between instances). */
-let simLedgerRun = 0;
 
 function freshState(): DemoState {
   runCounter += 1;
@@ -207,6 +219,8 @@ function freshState(): DemoState {
     log: [{ at: now(), level: "info", text: `New invoice ${id} drafted for ${SEED_WAYBILL.vessel} (${SEED_WAYBILL.route}).` }],
     busy: null,
     autopilot: false,
+    scenario: "normal",
+    opsReview: null,
     error: null,
     config: {
       chainReady: simMode || miss.length === 0,
@@ -215,7 +229,7 @@ function freshState(): DemoState {
       missing: miss,
       veloCheckout: veloCheckoutConfigured(),
       realWebhookSecret: usingRealWebhookSecret(),
-      llm: !!env("LLM_API_KEY"),
+      llm: llmConfigured(),
       tickMs: TICK_MS,
     },
     updatedAt: now(),
@@ -377,6 +391,8 @@ function facts(): Facts {
     paymentAmountMatches: !!state.payment?.amountMatches,
     vessel: SEED_WAYBILL.vessel,
     port: CEBU.name,
+    signals: ticks.length ? voyageSignals(ticks) : undefined,
+    opsReview: state.opsReview ?? null,
   };
 }
 
@@ -434,22 +450,30 @@ async function agentStep(): Promise<void> {
     }
   }
   const f = facts();
-  const prop = await decide(f);
-  if (!prop) return;
-  const key = `${state.run}:${prop.decision.decision}:${state.status}`;
+  // The rules say whether a decision is due (cheap, every tick); the model is asked once per decision point.
+  const due = propose(f);
+  if (!due) return;
+  const key = `${state.run}:${due.decision.decision}:${state.status}:${state.opsReview?.at ?? ""}`;
   if (decided.has(key)) return;
   decided.add(key);
+  const prop = await decide(f);
+  if (!prop) return;
   const kind = prop.decision.decision;
-  log("info", `Agent decided ${kind} (${prop.engine}). Executor checking gates, amounts and policy…`);
+  log("info", `Agent decided ${kind} (${prop.engine}).${kind === "HOLD" ? "" : " Executor checking gates, amounts and policy…"}`);
   if (kind === "HOLD") {
-    recordDecision(prop.decision, prop.engine, null);
+    recordDecision(prop.decision, prop.engine, null, { risks: prop.risks, reviewable: prop.reviewable, key });
+    if (prop.reviewable && state.status !== "HOLD") {
+      state.holdFrom = state.status;
+      setStatus("HOLD");
+      log("warn", `The agent held the ${due.decision.decision}: ${prop.decision.reason} No money moved; an ops review can release it.`);
+    }
     return;
   }
   const run = state.run;
   const execState = kind === "ADVANCE" ? "FUNDED" : "PAID";
   const result = await serial(() => execute(prop.decision, execContext(execState)));
   if (state.run !== run) return; // demo was reset while the chain call was in flight
-  recordDecision(prop.decision, prop.engine, result);
+  recordDecision(prop.decision, prop.engine, result, { risks: prop.risks, key });
   if (result.ok && result.decision === kind) {
     if (kind === "ADVANCE") {
       setStatus("ADVANCED");
@@ -520,22 +544,21 @@ async function onTick(t: Tick): Promise<void> {
 async function voyageLoop(token: number, startSeq = 0): Promise<void> {
   let seq = startSeq;
   while (token === voyageToken && seq < TOTAL_TICKS) {
-    if (fastForward && seq >= 2) {
-      fastForward = false;
-      const jump = berthTicksFrom(seq);
-      log("warn", "Fast-forward: vessel jumped to the Cebu quay.");
-      for (const s of jump) {
-        if (token !== voyageToken) return;
-        await onTick(makeTick(s));
-        await sleep(300);
-      }
-      break;
+    const scenarioDark = state.scenario === "ais-dark";
+    if (scenarioDark && AIS_DARK.dark.has(seq)) {
+      // No reading arrives: the gap is what the agent sees.
+      if (!AIS_DARK.dark.has(seq - 1)) log("warn", `AIS signal lost after ${state.voyage.latest?.leg ?? "the last reading"}.`);
+    } else {
+      const t = makeTick(seq, scenarioDark && seq === AIS_DARK.reappear ? { offsetKm: AIS_DARK.offsetKm } : {});
+      await onTick(t);
+      if (scenarioDark && seq === AIS_DARK.reappear) log("warn", `AIS back after ${voyageSignals(state.voyage.ticks).aisGapHours.toFixed(1)} h dark, ${t.laneKm.toFixed(1)} km off the sea lane.`);
     }
-    await onTick(makeTick(seq));
     seq += 1;
-    if (seq < TOTAL_TICKS) await sleep(TICK_MS);
+    // Fast-forward replays the remaining readings quickly rather than skipping them (a skip would read as an AIS gap).
+    if (seq < TOTAL_TICKS) await sleep(fastForward ? 150 : TICK_MS);
   }
   if (token === voyageToken) {
+    fastForward = false;
     state.voyage.running = false;
     emit();
     scheduleRelease();
@@ -563,12 +586,14 @@ export function fastForwardVoyage() {
         if (state.status === "FUNDED") {
           fastForward = true;
           state.voyage.running = true;
+          log("warn", "Fast-forward: replaying the voyage's AIS readings quickly.");
           const token = ++voyageToken;
           voyagePromise = voyageLoop(token).catch((e) => log("error", `voyage: ${e instanceof Error ? e.message : e}`));
           return;
         }
         throw new StepError("Nothing to fast-forward (voyage not running).");
       }
+      if (!fastForward) log("warn", "Fast-forward: replaying the rest of the voyage's AIS readings quickly.");
       fastForward = true;
     },
     { allowWhenBusy: true },
@@ -771,8 +796,8 @@ export function reset() {
   });
 }
 
-export function runDemo() {
-  return action("Run Demo", async () => {
+export function runDemo(scenario: Scenario = "normal") {
+  return action(scenario === "ais-dark" ? "Run Demo (AIS goes dark)" : "Run Demo", async () => {
     requireChain();
     state.autopilot = true;
     try {
@@ -787,7 +812,9 @@ export function runDemo() {
         state.log.unshift(...keep);
         emit();
       }
+      state.scenario = scenario;
       log("info", simMode ? "▶ Run Demo: full loop in SIMULATION mode (in-memory contracts, no Testnet transactions)." : "▶ Run Demo: full loop on Stellar Testnet.");
+      if (scenario === "ais-dark") log("warn", "Scenario: AIS goes dark mid-voyage and the vessel reappears off the sea lane, both under the hard limits. The agent decides whether to pay.");
       await inner(tokenize);
       await sleep(800);
       await inner(fund);
@@ -801,6 +828,30 @@ export function runDemo() {
       log(state.status === "SETTLED" ? "ok" : "warn", `■ Run Demo finished with status ${state.status}.`);
     } finally {
       state.autopilot = false;
+    }
+  });
+}
+
+/**
+ * Ops review: releases a hold the agent chose (or a hard-limit hold). The agent then decides again, with the review
+ * note among its facts; it may still hold. A hold from a failed check (no payment, wrong amount) can't be released.
+ */
+export function releaseHold() {
+  return action("Ops review: release hold", async () => {
+    requireChain();
+    if (state.status !== "HOLD" || !state.holdFrom) throw new StepError("Nothing is on hold.");
+    const held = [...state.decisions].reverse().find((d) => d.decision === "HOLD");
+    if (!held?.reviewable) throw new StepError("This hold came from a failed check, not a judgment: a review can't release it.");
+    state.opsReview = { at: now(), note: `Ops reviewed the concern behind the hold ("${held.reason.slice(0, 160)}") and cleared it.` };
+    const from = state.holdFrom;
+    state.holdFrom = null;
+    setStatus(from);
+    log("ok", "Ops review: hold released. The agent decides again, with the review note among its facts.");
+    await agentStep();
+    // An advance released after the vessel already berthed: catch the invoice up with the voyage.
+    if ((state.status as Status) === "ADVANCED" && state.voyage.berthed && !state.voyage.running) {
+      setStatus("BERTHED");
+      await progressPayment();
     }
   });
 }
@@ -925,10 +976,13 @@ function adopt(snap: DemoState): void {
     missing: miss,
     veloCheckout: veloCheckoutConfigured(),
     realWebhookSecret: usingRealWebhookSecret(),
-    llm: !!env("LLM_API_KEY"),
+    llm: llmConfigured(),
   };
   decided.clear();
-  for (const d of state.decisions) if (STATUS_OF[d.requested]) decided.add(`${state.run}:${d.requested}:${STATUS_OF[d.requested]}`);
+  for (const d of state.decisions) {
+    if (d.key) decided.add(d.key);
+    else if (STATUS_OF[d.requested]) decided.add(`${state.run}:${d.requested}:${STATUS_OF[d.requested]}:`);
+  }
   state.busy = null;
   state.autopilot = false;
   state.voyage.running = false;
