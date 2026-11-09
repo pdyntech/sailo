@@ -688,7 +688,8 @@ function progressPayment(): Promise<void> {
 /** Paid but not settled when its server stopped: the agent decides again. Counted as work so this server keeps the run (and isn't frozen) until it's done. */
 function resumeSettlement(): Promise<void> {
   if (paymentInFlight) return paymentInFlight;
-  paymentInFlight = serial(() => agentStep()).finally(() => {
+  // Not inside serial(): agentStep queues its own chain calls there, so wrapping it would deadlock.
+  paymentInFlight = agentStep().finally(() => {
     paymentInFlight = null;
     scheduleRelease();
   });
