@@ -153,6 +153,8 @@ export interface ModelVerdict {
   decision: "PROCEED" | "HOLD";
   reason: string;
   risks: string[];
+  /** The model that answered, when it was a fallback rather than LLM_MODEL. */
+  model?: string;
 }
 
 /** What the model sees: the permitted payout and the evidence, in plain units. */
@@ -216,17 +218,25 @@ export async function askModel(c: Anthropic, f: Facts, permitted: AgentDecision)
 
 const GEMINI_BASE = () => env("GEMINI_BASE_URL") ?? "https://generativelanguage.googleapis.com/v1beta";
 
+/**
+ * Second model to try when the first is rate-limited (429) or overloaded (5xx). Google limits each model separately,
+ * so this keeps the agent deciding on a free-tier key. LLM_FALLBACK_MODEL="" turns it off.
+ */
+const GEMINI_FALLBACK = () => process.env.LLM_FALLBACK_MODEL?.trim() ?? "gemini-3.5-flash-lite";
+
 /** Asks Gemini to PROCEED or HOLD. Throws if the model is unavailable or its answer is unusable. */
 export async function askGemini(key: string, f: Facts, permitted: AgentDecision, fetchFn: typeof fetch = fetch): Promise<ModelVerdict> {
-  const url = `${GEMINI_BASE()}/models/${encodeURIComponent(MODEL())}:generateContent`;
+  const models = [...new Set([MODEL(), GEMINI_FALLBACK()].filter(Boolean))];
   const body = JSON.stringify({
     systemInstruction: { parts: [{ text: SYSTEM }] },
     contents: [{ role: "user", parts: [{ text: JSON.stringify(evidence(f, permitted)) }] }],
     generationConfig: { responseMimeType: "application/json", responseSchema: GEMINI_SCHEMA, maxOutputTokens: 4000 },
   });
   let res: Response | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    res = await fetchFn(url, { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": key }, body, signal: AbortSignal.timeout(30_000) });
+  let model = models[0]!;
+  for (const m of models) {
+    model = m;
+    res = await fetchFn(`${GEMINI_BASE()}/models/${encodeURIComponent(m)}:generateContent`, { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": key }, body, signal: AbortSignal.timeout(25_000) });
     if (res.status !== 429 && res.status < 500) break;
   }
   if (!res!.ok) throw new Error(`API ${res!.status}`);
@@ -239,7 +249,8 @@ export async function askGemini(key: string, f: Facts, permitted: AgentDecision,
   if (!cand) throw new Error("the model declined");
   if (cand.finishReason === "MAX_TOKENS") throw new Error("the answer was cut off");
   if (cand.finishReason && cand.finishReason !== "STOP") throw new Error("the model declined");
-  return parseVerdict((cand.content?.parts ?? []).flatMap((p) => (p.thought || !p.text ? [] : [p.text])).join(""));
+  const v = parseVerdict((cand.content?.parts ?? []).flatMap((p) => (p.thought || !p.text ? [] : [p.text])).join(""));
+  return model === MODEL() ? v : { ...v, model };
 }
 
 /** The configured model's verdict on a permitted payout. */
@@ -259,7 +270,7 @@ export async function decide(f: Facts, ask: Ask = askConfigured): Promise<Propos
   if (!llmConfigured()) return rules;
   try {
     const v = await ask(f, base.decision);
-    const engine = MODEL();
+    const engine = v.model ?? MODEL();
     if (v.decision === "PROCEED") return { decision: { ...base.decision, reason: v.reason }, engine, reviewable: false, risks: v.risks };
     return { decision: { invoiceId: f.invoiceId, decision: "HOLD", reason: v.reason, payouts: [] }, engine, reviewable: true, risks: v.risks };
   } catch (e) {

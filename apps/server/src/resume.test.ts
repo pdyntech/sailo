@@ -65,6 +65,15 @@ describe("resuming a half-done payout", () => {
     expect(r.result.ok).toBe(true);
   });
 
+  it("finishes an advance whose authorize landed unrecorded: claim only", async () => {
+    const advance: AgentDecision = { invoiceId: "INV-1", decision: "ADVANCE", reason: "ok", payouts: [{ role: "SHIPOWNER", amountStroops: P.advance.toString() }] };
+    const c = chain(0n, { SHIPOWNER: P.advance });
+    const r = (await resumePayouts(input(c, { decision: advance })))!;
+    expect(c.client.authorizePayment).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ alreadyLanded: ["SHIPOWNER"], result: { ok: true, decision: "ADVANCE" } });
+    expect(c.pending()).toEqual({ SHIPOWNER: 0n });
+  });
+
   it("refuses to guess when the escrow doesn't match a run of payouts", async () => {
     expect(await resumePayouts(input(chain(V - 1n)))).toBeNull();
   });
