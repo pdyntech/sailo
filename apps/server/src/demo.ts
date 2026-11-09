@@ -457,6 +457,9 @@ async function agentStep(): Promise<void> {
     }
   }
   const f = facts();
+  // The LP's funding is on record but the escrow no longer covers the advance: an earlier server's advance may have
+  // landed without being recorded. Let the decision run; the resume (or the executor) checks the real balance.
+  if (f.status === "FUNDED" && !f.escrowFunded && state.txs.some((t) => t.label.startsWith("payment_escrow.fund_escrow (LP"))) f.escrowFunded = true;
   // The rules say whether a decision is due (cheap, every tick); the model is asked once per decision point.
   const due = propose(f);
   if (!due) return;

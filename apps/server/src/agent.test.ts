@@ -15,6 +15,7 @@ beforeEach(() => {
   delete process.env.LLM_MODEL;
   delete process.env.LLM_PROVIDER;
   delete process.env.GEMINI_API_KEY;
+  delete process.env.LLM_FALLBACK_MODEL;
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -150,7 +151,15 @@ describe("Gemini", () => {
     expect(JSON.parse(req.contents[0].parts[0].text).permittedPayout.decision).toBe("SETTLE");
   });
 
-  it("retries once on a server error, then reports the status", async () => {
+  it("falls back to the second model when the first is rate-limited, and says which answered", async () => {
+    const fetchFn = vi.fn(async (url: string) => (url.includes("flash-lite") ? reply(said({ decision: "HOLD", reason: "Gap.", risks: [] })) : reply({}, 429)));
+    const v = await askGemini("k", paid, permitted, fetchFn as unknown as typeof fetch);
+    expect(v).toMatchObject({ decision: "HOLD", model: "gemini-3.5-flash-lite" });
+    process.env.LLM_API_KEY = "AIzaTest";
+    expect((await decide(paid, async () => v))!.engine).toBe("gemini-3.5-flash-lite");
+  });
+
+  it("tries each model once on server errors, then reports the status", async () => {
     const fetchFn = vi.fn(async () => reply({}, 503));
     await expect(askGemini("k", paid, permitted, fetchFn as unknown as typeof fetch)).rejects.toThrow("API 503");
     expect(fetchFn).toHaveBeenCalledTimes(2);
