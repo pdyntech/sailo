@@ -34,6 +34,7 @@ import { env, missingChainEnv } from "./env.js";
 import { addBusyCheck } from "./background.js";
 import { INSTANCE_ID, delIf, extendIf, getJson, getRaw, kvEnabled, setJson, setNx } from "./kv.js";
 import { chainClient, topUp } from "./wallets.js";
+import { resumePayouts } from "./resume.js";
 import { AIS_DARK, CEBU, TOTAL_TICKS, isBerthed, isUnderway, makeTick, voyageSignals, type Tick } from "./telemetry.js";
 import {
   createCheckout,
@@ -439,6 +440,12 @@ function recordDecision(proposal: AgentDecision | null, engine: string, r: Execu
   return row;
 }
 
+/** Resume of a payout an earlier server started (see resume.ts), with this run's facts and signers. */
+function resumePartialPayout(d: AgentDecision) {
+  const gateOk = d.decision === "ADVANCE" ? facts().vesselUnderway : !!(state.payment?.verified && state.payment.amountMatches && state.attestation);
+  return resumePayouts({ client: getClient(), signers: getSigners(), deviceHash: state.invoice.hash!, decision: d, faceValue: V, gateOk, serial, log: (m) => log("warn", m) });
+}
+
 /** The agent looks at the facts and acts if a decision is due. Safe to call often. */
 async function agentStep(): Promise<void> {
   if (!state.config.chainReady || !state.invoice.hash) return;
@@ -471,9 +478,10 @@ async function agentStep(): Promise<void> {
   }
   const run = state.run;
   const execState = kind === "ADVANCE" ? "FUNDED" : "PAID";
-  const result = await serial(() => execute(prop.decision, execContext(execState)));
+  const resumed = await resumePartialPayout(prop.decision);
+  const result = resumed?.result ?? (await serial(() => execute(prop.decision, execContext(execState))));
   if (state.run !== run) return; // demo was reset while the chain call was in flight
-  recordDecision(prop.decision, prop.engine, result, { risks: prop.risks, key });
+  recordDecision(prop.decision, prop.engine, result, { risks: prop.risks, key, ...(resumed ? { extra: { executor: "resumed after a partial run", alreadyLanded: resumed.alreadyLanded } } : {}) });
   if (result.ok && result.decision === kind) {
     if (kind === "ADVANCE") {
       setStatus("ADVANCED");
