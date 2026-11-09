@@ -7,7 +7,7 @@ import * as demo from "./demo.js";
 import { withDb } from "./db.js";
 import { env } from "./env.js";
 import { getRaw, kvEnabled, setNx } from "./kv.js";
-import { dueJobs, recordPayment, startJobs } from "./portal-chain.js";
+import { dueJobs, hasCheckout, recordPayment, startJobs } from "./portal-chain.js";
 import { WebhookRejected, retrievePaymentStatus, verifyWebhook, type VerifiedEvent } from "./velo.js";
 
 const seenLocal = new Set<string>();
@@ -38,6 +38,12 @@ export async function handleVeloWebhook(raw: string, signature: string | null, d
     return { status: 200, body: { ok: true, ignored: ev.type } };
   }
   const piId = ev.paymentIntent.id;
+  // Not one of our checkouts (e.g. Velo's "Send test event"): acknowledge it, move nothing, skip the lookup.
+  const ours = (await withDb(() => hasCheckout(piId))) || (await demo.viewState()).checkout?.id === piId;
+  if (!ours) {
+    if (id) await markSeen(id);
+    return { status: 200, body: { ok: true, ignored: "unknown payment intent" } };
+  }
   // Ask Velo directly before moving money: the signed webhook says "paid", the payment intent must agree.
   let status: Awaited<ReturnType<typeof retrievePaymentStatus>>;
   try {

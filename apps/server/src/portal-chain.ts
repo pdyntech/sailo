@@ -204,6 +204,9 @@ export function signBerthing(i: PortalInvoice, readings: Reading[]): PortalChain
 }
 
 /** Records a verified payment for a portal invoice. Returns false if no invoice has this checkout. Call inside withDb. */
+/** True if a portal invoice's checkout created this payment intent. */
+export const hasCheckout = (paymentIntentId: string): boolean => db.invoices.some((x) => x.chain?.checkout?.id === paymentIntentId);
+
 export function recordPayment(paymentIntentId: string, ev: VerifiedEvent, simulated: boolean): boolean {
   const i = db.invoices.find((x) => x.chain?.checkout?.id === paymentIntentId);
   if (!i?.chain) return false;

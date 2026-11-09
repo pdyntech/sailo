@@ -10,10 +10,10 @@ vi.mock("./velo.js", () => ({
   verifyWebhook: velo.verifyWebhook,
   retrievePaymentStatus: velo.retrievePaymentStatus,
 }));
-vi.mock("./demo.js", () => ({ withDemo: (fn: () => unknown) => fn(), applyPayment: demo.applyPayment, BusyElsewhere: class extends Error {} }));
+vi.mock("./demo.js", () => ({ withDemo: (fn: () => unknown) => fn(), applyPayment: demo.applyPayment, viewState: async () => ({ checkout: { id: "pi_1" } }), BusyElsewhere: class extends Error {} }));
 vi.mock("./db.js", () => ({ withDb: async (fn: () => unknown) => fn() }));
 vi.mock("./kv.js", () => ({ kvEnabled: () => false, getRaw: vi.fn(), setNx: vi.fn() }));
-vi.mock("./portal-chain.js", () => ({ recordPayment: () => false, dueJobs: () => [], startJobs: vi.fn() }));
+vi.mock("./portal-chain.js", () => ({ hasCheckout: () => false, recordPayment: () => false, dueJobs: () => [], startJobs: vi.fn() }));
 vi.mock("./env.js", () => ({ env: (k: string) => process.env[k] || undefined }));
 
 const { handleVeloWebhook } = await import("./webhooks.js");
@@ -29,6 +29,13 @@ beforeEach(() => {
 });
 
 describe("Velo webhook: payment status is confirmed with Velo before money moves", () => {
+  it("acknowledges a payment that isn't one of our checkouts (Velo's test event) without looking it up", async () => {
+    velo.verifyWebhook.mockResolvedValue({ ...event(), paymentIntent: { id: "pi_test_123", amount: "1", asset: "native" } });
+    expect(await deliver()).toEqual({ status: 200, body: { ok: true, ignored: "unknown payment intent" } });
+    expect(velo.retrievePaymentStatus).not.toHaveBeenCalled();
+    expect(demo.applyPayment).not.toHaveBeenCalled();
+  });
+
   it("refuses a payment intent that Velo does not report as paid", async () => {
     velo.verifyWebhook.mockResolvedValue(event());
     velo.retrievePaymentStatus.mockResolvedValue({ id: "pi_1", status: "pending", amount: "1000", asset: "native" });
