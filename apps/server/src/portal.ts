@@ -540,7 +540,10 @@ export function fundInvoice(u: User, id: unknown): InvoiceView {
   return view(i, u, Date.now());
 }
 
-export type PayPlan = { kind: "done"; view: InvoiceView } | { kind: "checkout"; invoiceId: string; amountXlm: string; description: string };
+export type PayPlan =
+  | { kind: "done"; view: InvoiceView }
+  | { kind: "checkout"; invoiceId: string; amountXlm: string; description: string }
+  | { kind: "existing"; view: InvoiceView; checkoutId: string; invoiceId: string; amountXlm: string; description: string };
 
 /** First half of paying (under the db lock). Simulated invoices are paid at once; on-chain ones need a Velo checkout. */
 export function preparePay(u: User, id: unknown): PayPlan {
@@ -553,17 +556,36 @@ export function preparePay(u: User, id: unknown): PayPlan {
     return { kind: "done", view: view(i, u, Date.now()) };
   }
   if (i.chain.payment?.verified) return { kind: "done", view: view(i, u, Date.now()) };
-  // A real checkout already exists: send the cargo owner back to it instead of opening a second one.
-  if (i.chain.checkout && !i.chain.checkout.simulated && i.chain.checkout.url) return { kind: "done", view: view(i, u, Date.now()) };
-  return { kind: "checkout", invoiceId: i.id, amountXlm: fromStroops(phpToStroops(BigInt(i.face))), description: `Freight invoice ${i.id}: ${i.vessel}, ${i.route}` };
+  const amountXlm = fromStroops(phpToStroops(BigInt(i.face)));
+  const description = `Freight invoice ${i.id}: ${i.vessel}, ${i.route}`;
+  // A real checkout already exists: the caller asks Velo whether it was paid or expired before reusing it.
+  if (i.chain.checkout && !i.chain.checkout.simulated && i.chain.checkout.url) {
+    return { kind: "existing", view: view(i, u, Date.now()), checkoutId: i.chain.checkout.id, invoiceId: i.id, amountXlm, description };
+  }
+  return { kind: "checkout", invoiceId: i.id, amountXlm, description };
+}
+
+/**
+ * Velo says this invoice's checkout is paid, but no webhook was applied (lost or delayed): record it from the
+ * payment status, as PRD §8.4 asks. A webhook arriving later is a duplicate and changes nothing.
+ */
+export function recordPolledPayment(u: User, id: unknown, checkoutId: string, ev: VerifiedEvent): InvoiceView {
+  const i = find(u, id);
+  if (i.chain?.checkout?.id === checkoutId && !i.chain.payment?.verified) {
+    log(i, { title: "Payment confirmed with Velo", text: `No webhook had arrived, so Sailo asked Velo directly: checkout ${checkoutId} is paid.`, c: "payment_escrow" });
+    recordPayment(checkoutId, ev, false);
+  }
+  save();
+  return view(i, u, Date.now());
 }
 
 /** Second half (under the db lock again): store the checkout and, for a simulated one, its verified payment. */
-export function recordCheckout(u: User, id: unknown, session: CheckoutSession, ev: VerifiedEvent | null): InvoiceView {
+export function recordCheckout(u: User, id: unknown, session: CheckoutSession, ev: VerifiedEvent | null, replaces?: string): InvoiceView {
   const i = find(u, id);
   if (!i.chain) throw new HttpError(409, "This invoice is not on Stellar.");
   if (!i.chain.payment?.verified) {
-    if (!i.chain.checkout || i.chain.checkout.simulated) {
+    // replaces: an expired or cancelled checkout this one takes over from (only if it is still the current one).
+    if (!i.chain.checkout || i.chain.checkout.simulated || (replaces && i.chain.checkout.id === replaces)) {
       i.chain.checkout = { id: session.id, url: session.checkoutUrl, simulated: session.simulated, amountXlm: session.amount, createdAt: new Date().toISOString() };
     }
     if (ev) recordPayment(session.id, ev, true);
