@@ -9,7 +9,7 @@ import type { IncomingMessage } from "node:http";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "sailo-auth-"));
-delete process.env.SMTP_URL;
+process.env.SMTP_URL = ""; // set (empty) so .env.local can't turn real email on in tests
 vi.spyOn(console, "log").mockImplementation(() => undefined); // emails are logged when SMTP is off
 
 type Auth = typeof import("./accounts.js");
