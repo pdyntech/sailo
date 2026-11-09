@@ -242,7 +242,7 @@ Related code: the executor's [`execute`](packages/agent/src/executor.ts#L200), t
 | :-- | :-- |
 | Debtor checkout session (`velo.checkout.sessions.create`, asset `native`, idempotency key per invoice) | [`createCheckout`, velo.ts#L44](apps/server/src/velo.ts#L44) |
 | Signed webhook verification (`Velo.webhooks.verify`, raw body, 300 s tolerance) | [`verifyWebhook`, velo.ts#L122](apps/server/src/velo.ts#L122) |
-| Payment status (`velo.paymentIntents.retrieve`): before any money moves, the intent must be `paid` in the expected asset; Velo's amount wins over the webhook body | [`retrievePaymentStatus`, velo.ts#L83](apps/server/src/velo.ts#L83), checked in [webhooks.ts#L44](apps/server/src/webhooks.ts#L44) |
+| Payment status (`velo.paymentIntents.retrieve`): before any money moves, the intent must be `paid` in the expected asset; Velo's amount wins over the webhook body | [`retrievePaymentStatus`, velo.ts#L83](apps/server/src/velo.ts#L83), checked in [webhooks.ts#L50](apps/server/src/webhooks.ts#L50) |
 | Webhook route `POST /api/webhooks/velo` | [app.ts#L147](apps/server/src/app.ts#L147) |
 | De-dupe by `x-velo-delivery`, match amount to the invoice, then treasury funds escrow | [`applyPayment`, demo.ts#L622](apps/server/src/demo.ts#L622) |
 
