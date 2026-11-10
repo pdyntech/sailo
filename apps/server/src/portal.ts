@@ -37,7 +37,7 @@ import {
   type PortalChain,
 } from "./portal-chain.js";
 import { readingsAfter, readingsBerthed, type Reading } from "./telemetry.js";
-import { veloCheckoutConfigured, type CheckoutSession, type VerifiedEvent } from "./velo.js";
+import { receiverMismatch, veloCheckoutConfigured, type CheckoutSession, type VerifiedEvent } from "./velo.js";
 
 export type PState = "TOKENIZED" | "FUNDED" | "ADVANCED" | "IN_TRANSIT" | "BERTHED" | "PAID" | "SETTLED" | "HOLD";
 type Contract = "device_registry" | "agent_registry" | "payment_escrow";
@@ -587,6 +587,8 @@ export function recordCheckout(u: User, id: unknown, session: CheckoutSession, e
     // replaces: an expired or cancelled checkout this one takes over from (only if it is still the current one).
     if (!i.chain.checkout || i.chain.checkout.simulated || (replaces && i.chain.checkout.id === replaces)) {
       i.chain.checkout = { id: session.id, url: session.checkoutUrl, simulated: session.simulated, amountXlm: session.amount, createdAt: new Date().toISOString() };
+      const mismatch = receiverMismatch(session);
+      if (mismatch) console.warn(`portal ${i.id}: ${mismatch}`);
     }
     if (ev) recordPayment(session.id, ev, true);
     else log(i, { title: "Velo checkout opened", text: `Checkout ${session.id} for ${session.amount} XLM. Settlement starts when Velo confirms the payment.`, c: "payment_escrow" });

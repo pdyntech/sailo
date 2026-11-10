@@ -54,3 +54,12 @@ describe("checkout expiry", () => {
     for (const st of ["expired", "cancelled", "failed"]) expect(checkoutClosed(s(st, null), at)).toBe(true);
   });
 });
+
+describe("checkout receiver", () => {
+  it("warns when Velo would pay someone other than the treasury", async () => {
+    const { receiverMismatch } = await import("./velo.js");
+    expect(receiverMismatch({ receiverAddress: "GTREASURY", simulated: false }, "GTREASURY")).toBeNull();
+    expect(receiverMismatch({ receiverAddress: null, simulated: true }, "GTREASURY")).toBeNull();
+    expect(receiverMismatch({ receiverAddress: "GD2BT2HK6FAJGVD7YWOWGZY4WN3IWMQ6M42X3KCTHSAET5BQHK3UULDX", simulated: false }, "GDWRQZTREASURY")).toMatch(/not Sailo's treasury/);
+  });
+});
