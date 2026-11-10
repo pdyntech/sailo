@@ -45,6 +45,8 @@ import {
   type CheckoutSession,
   type VerifiedEvent,
   receiverMismatch,
+  retrievePaymentStatus,
+  checkoutClosed,
 } from "./velo.js";
 
 export type Status = "DRAFT" | "TOKENIZED" | "FUNDED" | "ADVANCED" | "IN_TRANSIT" | "BERTHED" | "PAID" | "SETTLED" | "HOLD" | "DEFAULT";
@@ -615,7 +617,13 @@ export function fastForwardVoyage() {
 // ---------- payment ----------
 export function checkout() {
   return action("Create Velo checkout", async () => {
-    if (state.checkout) return state.checkout;
+    if (state.checkout && (state.checkout.simulated || state.payment?.verified)) return state.checkout;
+    if (state.checkout) {
+      // Velo checkouts expire after ~30 min (the status stays "created"): reuse an open one, replace a closed one.
+      const st = await retrievePaymentStatus(state.checkout.id).catch(() => null);
+      if (!st || !checkoutClosed(st)) return state.checkout;
+      log("info", `Velo checkout ${state.checkout.id} expired unpaid; opening a new one.`);
+    }
     if (state.status === "DRAFT") throw new StepError("Tokenize the invoice first.");
     state.checkout = await createCheckout({
       invoiceId: state.invoice.id,
