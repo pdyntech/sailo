@@ -44,6 +44,7 @@ import {
   verifyWebhook,
   type CheckoutSession,
   type VerifiedEvent,
+  receiverMismatch,
 } from "./velo.js";
 
 export type Status = "DRAFT" | "TOKENIZED" | "FUNDED" | "ADVANCED" | "IN_TRANSIT" | "BERTHED" | "PAID" | "SETTLED" | "HOLD" | "DEFAULT";
@@ -622,6 +623,8 @@ export function checkout() {
       description: `Freight invoice ${state.invoice.id} (Manila → Cebu), ${SEED_WAYBILL.vessel}`,
     });
     log(state.checkout.simulated ? "warn" : "ok", state.checkout.simulated ? `Checkout simulated (no VELO_API_KEY): ${state.checkout.id}` : `Velo checkout session ${state.checkout.id} created for ${xlm(V)} XLM.`);
+    const mismatch = receiverMismatch(state.checkout, getSigners().TREASURY.publicKey);
+    if (mismatch) log("warn", mismatch);
     return state.checkout;
   });
 }

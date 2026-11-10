@@ -71,6 +71,16 @@ export async function createCheckout(o: { invoiceId: string; amountXlm: string; 
   return { id, checkoutUrl: str("checkoutUrl"), status: str("status") ?? "created", receiverAddress: str("receiverAddress"), simulated: false, amount: o.amountXlm, asset, createdAt };
 }
 
+/**
+ * Velo pays a checkout to the wallet that owns the Velo project. Sailo's treasury funds each escrow from what it
+ * receives, so the project should be owned by TREASURY_PUBLIC. Returns a warning when it is not.
+ */
+export function receiverMismatch(session: Pick<CheckoutSession, "receiverAddress" | "simulated">, treasury = env("TREASURY_PUBLIC")): string | null {
+  if (session.simulated || !session.receiverAddress || !treasury || session.receiverAddress === treasury) return null;
+  const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-6)}`;
+  return `Velo pays this checkout to ${short(session.receiverAddress)}, not Sailo's treasury (${short(treasury)}). Own the Velo project with the treasury wallet so the cargo owner's payment reaches it.`;
+}
+
 export interface PaymentStatus {
   id: string;
   status: string;
